@@ -1,0 +1,8 @@
+target/
+*.log
+*.log.*
+
+# Секреты — использовать application-local.yml или переменные окружения
+src/main/resources/application.yml
+
+!src/main/resources/application-example.yml
