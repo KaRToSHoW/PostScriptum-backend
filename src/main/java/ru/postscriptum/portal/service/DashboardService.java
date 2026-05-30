@@ -300,9 +300,64 @@ public class DashboardService {
         workload.put("capacity",   capacityHours);
         result.put("workload", workload);
 
-        // attention — placeholder
-        result.put("attention", List.of());
+        // attention — реальные события, требующие внимания преподавателя
+        List<Map<String, Object>> attention = new ArrayList<>();
+
+        // 1) Сданные домашки, ожидающие проверки
+        try {
+            List<Map<String, Object>> submitted = jdbc.queryForList(
+                    "SELECT s.name AS who, h.title, hs.submitted_at " +
+                    "FROM homework h " +
+                    "JOIN homework_submissions hs ON hs.homework_id = h.id " +
+                    "JOIN users s ON s.id = h.student_id " +
+                    "WHERE h.teacher_id = ? AND h.status = 'SUBMITTED' " +
+                    "ORDER BY hs.submitted_at DESC LIMIT 5",
+                    teacherId);
+            for (Map<String, Object> row : submitted) {
+                Map<String, Object> a = new LinkedHashMap<>();
+                a.put("who",  row.get("who"));
+                a.put("what", "Прислал(а) работу: " + row.get("title"));
+                a.put("timeAgo", relTime(toMsk(row.get("submitted_at"))));
+                a.put("type", "orange");
+                attention.add(a);
+            }
+        } catch (Exception ignored) {}
+
+        // 2) Пропущенные уроки
+        try {
+            List<Map<String, Object>> missed = jdbc.queryForList(
+                    "SELECT u.name AS who, l.scheduled_at " +
+                    "FROM lessons l " +
+                    "JOIN lesson_students ls ON ls.lesson_id = l.id " +
+                    "JOIN users u ON u.id = ls.student_id " +
+                    "WHERE l.teacher_id = ? AND l.status = 'MISSED' " +
+                    "ORDER BY l.scheduled_at DESC LIMIT 3",
+                    teacherId);
+            for (Map<String, Object> row : missed) {
+                OffsetDateTime dt = toMsk(row.get("scheduled_at"));
+                Map<String, Object> a = new LinkedHashMap<>();
+                a.put("who",  row.get("who"));
+                a.put("what", "Пропустил(а) урок" + (dt != null ? " " + dt.getDayOfMonth() + "." + String.format("%02d", dt.getMonthValue()) : ""));
+                a.put("timeAgo", relTime(dt));
+                a.put("type", "red");
+                attention.add(a);
+            }
+        } catch (Exception ignored) {}
+
+        result.put("attention", attention);
 
         return result;
+    }
+
+    private String relTime(OffsetDateTime dt) {
+        if (dt == null) return "";
+        long mins = java.time.Duration.between(dt, OffsetDateTime.now(MSK)).toMinutes();
+        if (mins < 0)   return "скоро";
+        if (mins < 60)  return mins + " мин назад";
+        long h = mins / 60;
+        if (h < 24)     return h + " ч назад";
+        long d = h / 24;
+        if (d == 1)     return "вчера";
+        return d + " дн назад";
     }
 }

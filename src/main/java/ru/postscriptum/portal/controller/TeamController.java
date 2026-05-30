@@ -1,40 +1,141 @@
 package ru.postscriptum.portal.controller;
 
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
+import java.sql.Timestamp;
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 @RestController
 @RequestMapping("/api/admin")
+@RequiredArgsConstructor
 public class TeamController {
 
-    // TODO: заменить на реальные данные из БД
+    private final JdbcTemplate jdbc;
 
     @GetMapping("/team")
-    public ResponseEntity<?> team() {
-        return ResponseEntity.ok(List.of(
-            Map.of("id", 1, "name", "Софья Фролова",     "role", "Админ · основатель",      "flag", "fr", "chip", "purple", "weekHours", "—",        "capacity", 30, "total", 23, "heatmap", List.of(4,5,3,5,4,2,0)),
-            Map.of("id", 2, "name", "Татьяна Кравченко", "role", "Преподаватель",            "flag", "en", "chip", "orange", "weekHours", "22 ч/нед", "capacity", 28, "total", 22, "heatmap", List.of(3,4,5,4,3,3,0)),
-            Map.of("id", 3, "name", "Pierre Bouchard",   "role", "Преподаватель · носитель", "flag", "fr", "chip", "orange", "weekHours", "12 ч/нед", "capacity", 20, "total", 12, "heatmap", List.of(2,3,2,2,3,0,0)),
-            Map.of("id", 4, "name", "Анна Жукова",       "role", "Менеджер",                 "flag", "",   "chip", "blue",   "weekHours", "11 заявок","capacity", 18, "total",  7, "heatmap", List.of(1,2,1,2,1,0,0)),
-            Map.of("id", 5, "name", "Лаура Мартин",      "role", "Преподаватель",            "flag", "es", "chip", "orange", "weekHours", "18 ч/нед", "capacity", 24, "total", 26, "over", true, "heatmap", List.of(4,5,4,5,4,3,1)),
-            Map.of("id", 6, "name", "Иван Шульц",        "role", "Преподаватель",            "flag", "de", "chip", "orange", "weekHours", "14 ч/нед", "capacity", 22, "total", 14, "heatmap", List.of(3,3,2,3,3,0,0))
-        ));
+    public ResponseEntity<?> team(Authentication auth) {
+        if (auth == null) return ResponseEntity.ok(List.of());
+
+        List<Map<String, Object>> result = jdbc.query(
+            "SELECT u.id, u.name, u.role, u.initials, " +
+            "       tp.capacity_hours, tp.is_native, tp.workload_chip, " +
+            "       (SELECT code FROM languages l " +
+            "          JOIN teacher_languages tl ON tl.language_id=l.id " +
+            "          WHERE tl.teacher_id=u.id AND tl.is_primary LIMIT 1) AS flag, " +
+            "       (SELECT COUNT(*) FROM enrollments e WHERE e.teacher_id = u.id) AS students_count " +
+            "FROM users u " +
+            "LEFT JOIN teacher_profiles tp ON tp.user_id = u.id " +
+            "WHERE u.role IN ('TEACHER','MANAGER','ADMIN') AND u.is_active = true " +
+            "ORDER BY u.role, u.name",
+            (rs, rowNum) -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", rs.getLong("id"));
+                row.put("name", rs.getString("name"));
+
+                String role = rs.getString("role");
+                boolean isNative = rs.getBoolean("is_native");
+                String roleLabel = switch (role == null ? "" : role) {
+                    case "TEACHER" -> isNative ? "Преподаватель · носитель" : "Преподаватель";
+                    case "MANAGER" -> "Менеджер";
+                    case "ADMIN"   -> "Админ · основатель";
+                    default        -> role;
+                };
+                row.put("role", roleLabel);
+
+                String chip = switch (role == null ? "" : role) {
+                    case "TEACHER" -> "orange";
+                    case "MANAGER" -> "blue";
+                    case "ADMIN"   -> "purple";
+                    default        -> "gray";
+                };
+                row.put("chip", chip);
+
+                String flag = rs.getString("flag");
+                row.put("flag", flag != null ? flag : "");
+
+                int capacityHours = rs.getInt("capacity_hours");
+                row.put("capacity", capacityHours > 0 ? capacityHours : 30);
+                row.put("weekHours", capacityHours > 0 ? capacityHours + " ч/нед" : "—");
+
+                long studentsCount = rs.getLong("students_count");
+                row.put("total", studentsCount);
+
+                // heatmap — static reasonable placeholder (no daily tracking yet)
+                row.put("heatmap", List.of(3, 4, 3, 4, 3, 2, 0));
+
+                return row;
+            }
+        );
+
+        return ResponseEntity.ok(result);
     }
 
     @GetMapping("/leads")
-    public ResponseEntity<?> leads() {
-        return ResponseEntity.ok(List.of(
-            Map.of("id", 1, "name", "Мария Климова",  "details", "Французский · с нуля · вечер · 2р/нед",  "receivedAt", "20 мин", "lang", "fr", "isNew", true),
-            Map.of("id", 2, "name", "Артём Зайцев",   "details", "Английский · B1 · утро · 3р/нед",         "receivedAt", "2 ч",    "lang", "en", "isNew", false),
-            Map.of("id", 3, "name", "Наташа Белова",  "details", "Испанский · с нуля · любое время",        "receivedAt", "вчера",  "lang", "es", "isNew", false),
-            Map.of("id", 4, "name", "Олег Тихонов",   "details", "Немецкий · A2 · выходные",                "receivedAt", "2 дн",   "lang", "de", "isNew", false),
-            Map.of("id", 5, "name", "Света Лебедева", "details", "Французский · B2 · вечер · носитель",     "receivedAt", "3 дн",   "lang", "fr", "isNew", false),
-            Map.of("id", 6, "name", "Рома Фёдоров",   "details", "Итальянский · с нуля · вечер",             "receivedAt", "5 дн",   "lang", "it", "isNew", false),
-            Map.of("id", 7, "name", "Диана Павлова",  "details", "Английский · C1 · подготовка IELTS",       "receivedAt", "1 нед",  "lang", "en", "isNew", false)
-        ));
+    public ResponseEntity<?> leads(Authentication auth) {
+        if (auth == null) return ResponseEntity.ok(List.of());
+
+        List<Map<String, Object>> result = jdbc.query(
+            "SELECT le.id, le.name, le.status, " +
+            "       COALESCE(lang.code,'') AS lang, " +
+            "       CONCAT_WS(' · ', lang.name_ru, lv.code, le.preferred_time, le.frequency) AS details, " +
+            "       le.received_at " +
+            "FROM leads le " +
+            "LEFT JOIN languages lang ON lang.id = le.language_id " +
+            "LEFT JOIN levels lv ON lv.id = le.level_id " +
+            "ORDER BY le.received_at DESC",
+            (rs, rowNum) -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", rs.getLong("id"));
+                row.put("name", rs.getString("name"));
+                row.put("details", rs.getString("details"));
+                row.put("lang", rs.getString("lang"));
+
+                String status = rs.getString("status");
+                row.put("isNew", "NEW".equals(status));
+
+                Timestamp ts = rs.getTimestamp("received_at");
+                row.put("receivedAt", ts != null ? humanizeTime(ts.toLocalDateTime()) : "—");
+
+                return row;
+            }
+        );
+
+        return ResponseEntity.ok(result);
+    }
+
+    private String humanizeTime(LocalDateTime receivedAt) {
+        Duration d = Duration.between(receivedAt, LocalDateTime.now());
+        long minutes = d.toMinutes();
+        if (minutes < 1)  return "только что";
+        if (minutes < 60) return minutes + " мин";
+        long hours = d.toHours();
+        if (hours < 24)   return hours + " ч";
+        long days = d.toDays();
+        if (days == 1)    return "вчера";
+        if (days < 7)     return days + " дн";
+        long weeks = days / 7;
+        if (weeks < 5)    return weeks + " нед";
+        return (days / 30) + " мес";
+    }
+
+    @PostMapping("/leads/{id}/status")
+    public ResponseEntity<?> updateLeadStatus(@PathVariable long id,
+                                               @RequestBody Map<String, String> body,
+                                               Authentication auth) {
+        if (auth == null) return ResponseEntity.status(401).build();
+        String status = body.get("status");
+        if (status == null || status.isBlank()) return ResponseEntity.badRequest().build();
+        jdbc.update("UPDATE leads SET status=?::lead_status WHERE id=?", status, id);
+        return ResponseEntity.ok().build();
     }
 
     @GetMapping("/access-matrix")
