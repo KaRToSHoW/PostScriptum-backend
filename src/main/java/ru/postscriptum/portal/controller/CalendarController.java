@@ -1,38 +1,84 @@
 package ru.postscriptum.portal.controller;
 
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
+import ru.postscriptum.portal.repository.UserRepository;
 
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 @RestController
 @RequestMapping("/api/calendar")
+@RequiredArgsConstructor
 public class CalendarController {
 
-    // TODO: заменить на реальные данные из БД по запрошенному месяцу
+    private final JdbcTemplate jdbc;
+    private final UserRepository userRepository;
 
     @GetMapping
     public ResponseEntity<?> student(
+            Authentication auth,
             @RequestParam(defaultValue = "2026") int year,
             @RequestParam(defaultValue = "5")    int month) {
 
+        if (auth == null) {
+            return ResponseEntity.ok(Map.of("year", year, "month", month, "events", Map.of()));
+        }
+
+        String email = auth.getName();
+
+        String sql = """
+            SELECT
+              EXTRACT(DAY FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') AS day,
+              TO_CHAR(l.scheduled_at AT TIME ZONE 'Europe/Moscow', 'HH24:MI') AS time,
+              lang.code AS lang,
+              l.status
+            FROM lesson_students ls
+            JOIN lessons l ON l.id = ls.lesson_id
+            JOIN languages lang ON lang.id = l.language_id
+            JOIN users u ON u.id = ls.student_id
+            WHERE u.email = ?
+              AND EXTRACT(YEAR FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') = ?
+              AND EXTRACT(MONTH FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') = ?
+            ORDER BY l.scheduled_at ASC
+            """;
+
+        List<Map<String, Object>> rows = jdbc.queryForList(sql, email, year, month);
+
+        // Status mapping
+        Map<String, String> statusMap = Map.of(
+            "DONE",        "done",
+            "MISSED",      "missed",
+            "PLANNED",     "planned",
+            "IN_PROGRESS", "now",
+            "CANCELLED",   "missed"
+        );
+
+        // Group by day
+        Map<Integer, List<Map<String, Object>>> grouped = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            int day = ((Number) row.get("day")).intValue();
+            String rawStatus = (String) row.get("status");
+            String mappedStatus = statusMap.getOrDefault(rawStatus != null ? rawStatus : "", rawStatus);
+
+            Map<String, Object> event = new LinkedHashMap<>();
+            event.put("time",   row.get("time"));
+            event.put("lang",   row.get("lang"));
+            event.put("status", mappedStatus);
+
+            grouped.computeIfAbsent(day, k -> new ArrayList<>()).add(event);
+        }
+
+        // Convert Integer keys to String keys for JSON
+        Map<String, Object> events = new LinkedHashMap<>();
+        grouped.forEach((k, v) -> events.put(String.valueOf(k), v));
+
         return ResponseEntity.ok(Map.of(
-            "year",  year,
-            "month", month,
-            "events", Map.of(
-                "1",  List.of(Map.of("time", "10:00", "title", "FR · Анна",       "lang", "fr", "status", "done")),
-                "4",  List.of(Map.of("time", "18:30", "title", "FR · Анна",       "lang", "fr", "status", "done"),
-                               Map.of("time", "19:00", "title", "EN · Михаил",     "lang", "en", "status", "done")),
-                "12", List.of(Map.of("time", "10:00", "title", "FR · Анна",       "lang", "fr", "status", "today"),
-                               Map.of("time", "15:00", "title", "FR · пара",       "lang", "fr", "status", "now"),
-                               Map.of("time", "18:30", "title", "FR · Lecture",    "lang", "fr", "status", "today")),
-                "18", List.of(Map.of("time", "18:30", "title", "FR · Анна",       "lang", "fr", "status", "planned")),
-                "19", List.of(Map.of("time", "10:00", "title", "DE · Денис",      "lang", "de", "status", "planned"),
-                               Map.of("time", "18:30", "title", "FR · Анна",       "lang", "fr", "status", "planned")),
-                "25", List.of(Map.of("time", "10:00", "title", "FR · Анна",       "lang", "fr", "status", "planned")),
-                "26", List.of(Map.of("time", "18:30", "title", "FR · группа",     "lang", "fr", "status", "planned"))
-            )
+            "year",   year,
+            "month",  month,
+            "events", events
         ));
     }
 
@@ -49,18 +95,7 @@ public class CalendarController {
                 Map.of("id", 2, "name", "Zoom — зал 2"),
                 Map.of("id", 3, "name", "Офис · каб. 1")
             ),
-            "slots", List.of(
-                Map.of("day", 12, "timeFrom", "10:00", "timeTo", "11:00",
-                       "teacher", "Софья Ф.",   "student", "Анна С.",    "lang", "fr", "room", 1, "status", "today"),
-                Map.of("day", 12, "timeFrom", "15:00", "timeTo", "16:00",
-                       "teacher", "Pierre B.",   "student", "группа FR",  "lang", "fr", "room", 2, "status", "now"),
-                Map.of("day", 12, "timeFrom", "18:30", "timeTo", "19:30",
-                       "teacher", "Татьяна К.", "student", "Михаил О.",  "lang", "en", "room", 1, "status", "today"),
-                Map.of("day", 18, "timeFrom", "18:30", "timeTo", "19:30",
-                       "teacher", "Софья Ф.",   "student", "Анна С.",    "lang", "fr", "room", 1, "status", "planned"),
-                Map.of("day", 19, "timeFrom", "10:00", "timeTo", "11:00",
-                       "teacher", "Иван Ш.",    "student", "Денис Н.",   "lang", "de", "room", 3, "status", "planned")
-            )
+            "slots", List.of()
         ));
     }
 }
