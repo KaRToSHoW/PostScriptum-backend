@@ -54,7 +54,18 @@ public class User {
     @Column(name = "updated_at")
     private OffsetDateTime updatedAt;
 
-    // совместимость со старым кодом — subtitle → не в схеме, храним в student_profiles/teacher_profiles
     @Transient
     private String subtitle;
+
+    @PrePersist
+    void prePersist() {
+        OffsetDateTime now = OffsetDateTime.now();
+        if (createdAt == null) createdAt = now;
+        if (updatedAt == null) updatedAt = now;
+    }
+
+    @PreUpdate
+    void preUpdate() {
+        updatedAt = OffsetDateTime.now();
+    }
 }
