@@ -1,6 +1,5 @@
 package ru.postscriptum.portal.config;
 
-import org.flywaydb.core.api.exception.FlywayValidateException;
 import org.springframework.boot.autoconfigure.flyway.FlywayMigrationStrategy;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -9,16 +8,24 @@ import org.springframework.context.annotation.Configuration;
 public class FlywayConfig {
 
     /**
-     * Если схема уже существует (старый деплой без Flyway) — делаем baseline,
-     * затем запускаем миграции. Иначе запускаем как обычно.
+     * Стратегия для перехода старой БД (без истории Flyway) на управление Flyway:
+     * 1. repair()  — очищает любые FAILED-миграции из предыдущих неудачных запусков
+     * 2. migrate() — пробует применить миграции
+     * 3. Если схема непустая и нет таблицы истории → baseline() → migrate()
      */
     @Bean
     public FlywayMigrationStrategy flywayMigrationStrategy() {
         return flyway -> {
             try {
+                flyway.repair();
+            } catch (Exception ignored) {
+                // repair может упасть если история ещё не создана — игнорируем
+            }
+            try {
                 flyway.migrate();
             } catch (Exception e) {
-                if (e.getMessage() != null && e.getMessage().contains("non-empty schema")) {
+                String msg = e.getMessage();
+                if (msg != null && msg.contains("non-empty schema")) {
                     flyway.baseline();
                     flyway.migrate();
                 } else {
