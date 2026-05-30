@@ -2,40 +2,33 @@ package ru.postscriptum.portal.model;
 
 import jakarta.persistence.*;
 import lombok.*;
+import java.math.BigDecimal;
 
 @Entity
 @Table(name = "teacher_profiles")
-@Data
-@Builder
-@NoArgsConstructor
-@AllArgsConstructor
+@Data @Builder @NoArgsConstructor @AllArgsConstructor
 public class TeacherProfile {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+    @Column(name = "user_id")
+    private Long userId;
 
     @OneToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "user_id", unique = true)
+    @MapsId
+    @JoinColumn(name = "user_id")
     private User user;
 
     @Column(columnDefinition = "TEXT")
     private String bio;
 
-    private String experience;
+    @Column(name = "capacity_hours", nullable = false)
+    private Short capacityHours = 20;
 
-    private Double rating;
+    @Column(name = "is_native", nullable = false)
+    private boolean native_ = false;
 
-    private Integer reviewCount;
+    private BigDecimal rating;
 
-    private Boolean nativeSpeaker;
-
-    @Column(length = 500)
-    private String languages;
-
-    @Column(length = 500)
-    private String tags;
-
-    @Column(length = 10)
-    private String primaryLang;
+    @Column(name = "workload_chip")
+    private String workloadChip = "orange";
 }

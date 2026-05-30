@@ -46,7 +46,9 @@ public class AuthService {
                 .password(passwordEncoder.encode(req.password()))
                 .role(UserRole.STUDENT)
                 .initials(initials)
-                .subtitle("Ученик · ожидает распределения")
+                .timezone("Europe/Moscow")
+                .locale("ru")
+                .active(true)
                 .build());
 
         return toResponse(user);
@@ -59,12 +61,19 @@ public class AuthService {
     }
 
     private AuthResponse toResponse(User user) {
+        String subtitle = switch (user.getRole()) {
+            case STUDENT  -> "Ученик";
+            case TEACHER  -> "Преподаватель";
+            case PARENT   -> "Родитель";
+            case MANAGER  -> "Менеджер";
+            case ADMIN    -> "Администратор";
+        };
         return new AuthResponse(
                 tokenProvider.generateToken(user),
                 user.getRole().name().toLowerCase(),
                 user.getName(),
                 user.getInitials(),
-                user.getSubtitle()
+                subtitle
         );
     }
 }
