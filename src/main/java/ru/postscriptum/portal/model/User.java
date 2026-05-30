@@ -2,6 +2,8 @@ package ru.postscriptum.portal.model;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.JdbcType;
+import org.hibernate.dialect.PostgreSQLEnumJdbcType;
 import java.time.OffsetDateTime;
 
 @Entity
@@ -28,7 +30,8 @@ public class User {
     private String initials;
 
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false, columnDefinition = "user_role")
+    @JdbcType(PostgreSQLEnumJdbcType.class)
+    @Column(nullable = false)
     private UserRole role;
 
     private String phone;

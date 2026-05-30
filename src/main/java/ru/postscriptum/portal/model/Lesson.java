@@ -2,6 +2,8 @@ package ru.postscriptum.portal.model;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.JdbcType;
+import org.hibernate.dialect.PostgreSQLEnumJdbcType;
 import java.time.OffsetDateTime;
 
 @Entity
@@ -29,7 +31,8 @@ public class Lesson {
     private Integer roomId;
 
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false, columnDefinition = "lesson_format")
+    @JdbcType(PostgreSQLEnumJdbcType.class)
+    @Column(nullable = false)
     private LessonFormat format = LessonFormat.INDIVIDUAL;
 
     private String title;
@@ -45,7 +48,8 @@ public class Lesson {
     private String zoomUrl;
 
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false, columnDefinition = "lesson_status")
+    @JdbcType(PostgreSQLEnumJdbcType.class)
+    @Column(nullable = false)
     private LessonStatus status = LessonStatus.PLANNED;
 
     @Column(name = "teacher_note")
