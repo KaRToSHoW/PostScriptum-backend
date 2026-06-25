@@ -52,14 +52,16 @@ public class SecurityConfig {
             .headers(h -> h.frameOptions(f -> f.disable()))  // для H2 console
             .exceptionHandling(e -> e
                 .authenticationEntryPoint((req, res, ex) -> {
-                    res.setContentType(MediaType.APPLICATION_JSON_VALUE);
                     res.setStatus(401);
+                    res.setCharacterEncoding("UTF-8");
+                    res.setContentType(MediaType.APPLICATION_JSON_VALUE);
                     res.getWriter().write(new ObjectMapper().writeValueAsString(
                         java.util.Map.of("message", "Не авторизован")));
                 })
                 .accessDeniedHandler((req, res, ex) -> {
-                    res.setContentType(MediaType.APPLICATION_JSON_VALUE);
                     res.setStatus(403);
+                    res.setCharacterEncoding("UTF-8");
+                    res.setContentType(MediaType.APPLICATION_JSON_VALUE);
                     res.getWriter().write(new ObjectMapper().writeValueAsString(
                         java.util.Map.of("message", "Недостаточно прав")));
                 })
