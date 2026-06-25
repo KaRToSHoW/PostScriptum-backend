@@ -40,14 +40,22 @@ public class ProfileController {
         if (auth == null) return ResponseEntity.status(401).build();
 
         String email = auth.getName();
-        String name      = body.get("name")      != null ? (String) body.get("name")      : null;
-        String phone     = body.get("phone")     != null ? (String) body.get("phone")     : null;
-        String timezone  = body.get("timezone")  != null ? (String) body.get("timezone")  : null;
-        String avatarUrl = body.get("avatarUrl") != null ? (String) body.get("avatarUrl") : null;
+        String name      = (String) body.get("name");
+        String timezone  = (String) body.get("timezone");
+        boolean hasPhone  = body.containsKey("phone");
+        boolean hasAvatar = body.containsKey("avatarUrl");
+        String phone     = hasPhone  ? (String) body.get("phone")     : null;
+        String avatarUrl = hasAvatar ? (String) body.get("avatarUrl") : null;
 
+        // phone/avatarUrl only touched when the key is present in the request body
+        // (e.g. an avatar-only update must not wipe phone, and vice versa for a profile-form save)
         jdbc.update(
-            "UPDATE users SET name=COALESCE(?,name), phone=?, timezone=COALESCE(?,timezone), avatar_url=? WHERE email=?",
-            name, phone, timezone, avatarUrl, email);
+            "UPDATE users SET name=COALESCE(?,name), " +
+            "phone = CASE WHEN ? THEN ? ELSE phone END, " +
+            "timezone=COALESCE(?,timezone), " +
+            "avatar_url = CASE WHEN ? THEN ? ELSE avatar_url END " +
+            "WHERE email=?",
+            name, hasPhone, phone, timezone, hasAvatar, avatarUrl, email);
 
         Map<String, Object> row = jdbc.queryForMap(
             "SELECT name, phone, timezone, avatar_url FROM users WHERE email=?", email);
