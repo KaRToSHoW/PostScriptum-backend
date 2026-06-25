@@ -23,12 +23,16 @@ public class StudentsController {
 
         List<Map<String, Object>> result = jdbc.query(
             "SELECT u.id, u.name, u.initials, u.email, u.phone, " +
+            "       p.name AS parent_name, " +
             "       (SELECT COUNT(*) FROM enrollments e WHERE e.student_id = u.id AND e.is_active) AS courses, " +
             "       (SELECT STRING_AGG(DISTINCT t.name, ', ') " +
             "          FROM enrollments e JOIN users t ON t.id = e.teacher_id " +
             "          WHERE e.student_id = u.id) AS teachers, " +
             "       (SELECT ROUND(AVG(e.progress_pct)) FROM enrollments e WHERE e.student_id = u.id) AS avg_progress " +
-            "FROM users u WHERE u.role = 'STUDENT' AND u.is_active = true " +
+            "FROM users u " +
+            "LEFT JOIN student_profiles sp ON sp.user_id = u.id " +
+            "LEFT JOIN users p ON p.id = sp.parent_id " +
+            "WHERE u.role = 'STUDENT' AND u.is_active = true " +
             "ORDER BY u.name",
             (rs, rowNum) -> {
                 Map<String, Object> row = new LinkedHashMap<>();
@@ -37,6 +41,7 @@ public class StudentsController {
                 row.put("initials", rs.getString("initials"));
                 row.put("email", rs.getString("email"));
                 row.put("phone", rs.getString("phone"));
+                row.put("parentName", rs.getString("parent_name"));
                 row.put("courses", rs.getLong("courses"));
                 row.put("teachers", rs.getString("teachers"));
                 long avgProgress = rs.getLong("avg_progress");

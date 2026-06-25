@@ -17,5 +17,6 @@ public record TeacherDto(
         String bio,
         String next,
         List<String> tags,
-        boolean myTeacher
+        boolean myTeacher,
+        String email
 ) {}

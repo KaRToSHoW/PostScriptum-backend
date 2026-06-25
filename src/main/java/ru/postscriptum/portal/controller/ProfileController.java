@@ -17,6 +17,24 @@ public class ProfileController {
     private final JdbcTemplate jdbc;
     private final PasswordEncoder passwordEncoder;
 
+    @GetMapping
+    public ResponseEntity<?> get(Authentication auth) {
+        if (auth == null) return ResponseEntity.status(401).build();
+
+        Map<String, Object> row = jdbc.queryForMap(
+            "SELECT name, email, phone, timezone, avatar_url, role FROM users WHERE email=?",
+            auth.getName());
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("name",      row.get("name"));
+        result.put("email",     row.get("email"));
+        result.put("phone",     row.get("phone"));
+        result.put("timezone",  row.get("timezone"));
+        result.put("avatarUrl", row.get("avatar_url"));
+        result.put("role",      row.get("role"));
+        return ResponseEntity.ok(result);
+    }
+
     @PutMapping
     public ResponseEntity<?> update(Authentication auth, @RequestBody Map<String, Object> body) {
         if (auth == null) return ResponseEntity.status(401).build();

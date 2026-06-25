@@ -22,6 +22,9 @@ import ru.postscriptum.portal.security.JwtAuthFilter;
 
 import java.util.List;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.http.MediaType;
+
 @Configuration
 @EnableWebSecurity
 @RequiredArgsConstructor
@@ -39,12 +42,28 @@ public class SecurityConfig {
             .cors(cors -> cors.configurationSource(corsSource()))
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
+                .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 .requestMatchers("/api/auth/**", "/h2-console/**").permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/teachers", "/api/teachers/**").permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/files/**").permitAll()
+                .requestMatchers("/api/admin/**").hasAnyRole("ADMIN", "MANAGER")
                 .anyRequest().authenticated()
             )
             .headers(h -> h.frameOptions(f -> f.disable()))  // для H2 console
+            .exceptionHandling(e -> e
+                .authenticationEntryPoint((req, res, ex) -> {
+                    res.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                    res.setStatus(401);
+                    res.getWriter().write(new ObjectMapper().writeValueAsString(
+                        java.util.Map.of("message", "Не авторизован")));
+                })
+                .accessDeniedHandler((req, res, ex) -> {
+                    res.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                    res.setStatus(403);
+                    res.getWriter().write(new ObjectMapper().writeValueAsString(
+                        java.util.Map.of("message", "Недостаточно прав")));
+                })
+            )
             .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();

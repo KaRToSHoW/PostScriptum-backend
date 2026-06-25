@@ -148,8 +148,8 @@ public class TeamController {
                 Map.of("name", "Домашние задания",   "permissions", List.of("R/W",  "R",    "R/W",  "—",    "R/W")),
                 Map.of("name", "Материалы курса",    "permissions", List.of("R",    "—",    "R/W",  "—",    "R/W")),
                 Map.of("name", "Финансы · свои",     "permissions", List.of("R",    "R",    "R",    "—",    "R/W")),
-                Map.of("name", "Финансы · все",      "permissions", List.of("—",    "—",    "—",    "—",    "R/W")),
-                Map.of("name", "Управление ролями",  "permissions", List.of("—",    "—",    "—",    "—",    "R/W")),
+                Map.of("name", "Финансы · все",      "permissions", List.of("—",    "—",    "—",    "R/W",  "R/W")),
+                Map.of("name", "Управление ролями",  "permissions", List.of("—",    "—",    "—",    "R",    "R/W")),
                 Map.of("name", "Заявки и лиды",      "permissions", List.of("—",    "—",    "—",    "R/W",  "R/W"))
             )
         ));

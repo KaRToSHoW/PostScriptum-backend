@@ -22,7 +22,7 @@ public class TeacherService {
 
     public List<TeacherDto> listTeachers(String currentUserEmail) {
         String sql = """
-            SELECT u.id, u.name, u.initials,
+            SELECT u.id, u.name, u.initials, u.email,
                    tp.bio, tp.is_native, tp.rating, tp.workload_chip,
                    STRING_AGG(DISTINCT l.code, ',') AS lang_codes,
                    STRING_AGG(DISTINCT l.name_ru || ' ' || lv.code, ',') AS lang_names,
@@ -33,7 +33,7 @@ public class TeacherService {
             LEFT JOIN languages l ON l.id = tl.language_id
             LEFT JOIN levels lv ON lv.id = tl.level_id
             WHERE u.role = 'TEACHER' AND u.is_active = true
-            GROUP BY u.id, u.name, u.initials, tp.bio, tp.is_native, tp.rating, tp.workload_chip
+            GROUP BY u.id, u.name, u.initials, u.email, tp.bio, tp.is_native, tp.rating, tp.workload_chip
             """;
 
         List<Map<String, Object>> rows = jdbc.queryForList(sql);
@@ -108,7 +108,8 @@ public class TeacherService {
                 teacherId, (String) row.get("name"), (String) row.get("initials"),
                 subtitle,
                 flag, isNative, langs, rating, 0, students,
-                null, bio, next, List.of(), myTeacher
+                null, bio, next, List.of(), myTeacher,
+                (String) row.get("email")
             ));
         }
         return result;

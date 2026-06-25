@@ -207,4 +207,33 @@ public class FinanceController {
             "totalPages",    totalPages
         ));
     }
+
+    @PostMapping("/subscriptions")
+    public ResponseEntity<?> createSubscription(@RequestBody Map<String, Object> body, Authentication auth) {
+        if (auth == null) return ResponseEntity.status(401).build();
+
+        Object studentIdObj = body.get("studentId");
+        Object planIdObj    = body.get("planId");
+        if (studentIdObj == null || planIdObj == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Не указан ученик или тариф"));
+        }
+        long studentId = ((Number) studentIdObj).longValue();
+        long planId    = ((Number) planIdObj).longValue();
+
+        Map<String, Object> plan;
+        try {
+            plan = jdbc.queryForMap("SELECT lesson_count FROM subscription_plans WHERE id=?", planId);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Тариф не найден"));
+        }
+        int lessonCount = ((Number) plan.get("lesson_count")).intValue();
+
+        jdbc.update(
+            "INSERT INTO subscriptions (student_id, plan_id, lessons_used, lessons_total, start_date, end_date, status, created_at) " +
+            "VALUES (?, ?, 0, ?, CURRENT_DATE, CURRENT_DATE + INTERVAL '30 days', 'ACTIVE'::subscription_status, NOW())",
+            studentId, planId, lessonCount
+        );
+
+        return ResponseEntity.ok().build();
+    }
 }
