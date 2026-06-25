@@ -10,6 +10,7 @@ public record TeacherDto(
         String flag,
         boolean nativeSpeaker,
         List<String> langs,
+        List<String> langCodes,
         double rating,
         int reviews,
         int students,

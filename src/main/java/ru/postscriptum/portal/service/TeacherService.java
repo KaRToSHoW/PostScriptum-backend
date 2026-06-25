@@ -66,6 +66,12 @@ public class TeacherService {
                     ? Arrays.asList(langNamesStr.split(","))
                     : List.of();
 
+            // lang codes list (fr, en, de, ...)
+            String langCodesStr = (String) row.get("lang_codes");
+            List<String> langCodes = langCodesStr != null
+                    ? Arrays.asList(langCodesStr.split(","))
+                    : List.of();
+
             // student count
             int students = 0;
             try {
@@ -107,7 +113,7 @@ public class TeacherService {
             result.add(new TeacherDto(
                 teacherId, (String) row.get("name"), (String) row.get("initials"),
                 subtitle,
-                flag, isNative, langs, rating, 0, students,
+                flag, isNative, langs, langCodes, rating, 0, students,
                 null, bio, next, List.of(), myTeacher,
                 (String) row.get("email")
             ));
