@@ -43,9 +43,12 @@ public class SecurityConfig {
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-                .requestMatchers("/api/auth/**", "/h2-console/**").permitAll()
+                .requestMatchers("/api/auth/**", "/h2-console/**", "/error").permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/teachers", "/api/teachers/**").permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/files/**").permitAll()
+                // Управление пользователями (создание, смена роли, активация/деактивация
+                // чужих аккаунтов) — только ADMIN, менеджеру это недоступно
+                .requestMatchers("/api/admin/users/**").hasRole("ADMIN")
                 .requestMatchers("/api/admin/**").hasAnyRole("ADMIN", "MANAGER")
                 .anyRequest().authenticated()
             )

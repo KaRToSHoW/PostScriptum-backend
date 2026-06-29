@@ -28,26 +28,52 @@ public class CalendarController {
         }
 
         String email = auth.getName();
+        String role;
+        try {
+            role = jdbc.queryForObject("SELECT role FROM users WHERE email = ?", String.class, email);
+        } catch (Exception e) {
+            role = "STUDENT";
+        }
 
-        String sql = """
-            SELECT
-              EXTRACT(DAY FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') AS day,
-              TO_CHAR(l.scheduled_at AT TIME ZONE 'Europe/Moscow', 'HH24:MI') AS time,
-              lang.code AS lang,
-              l.status,
-              t.name AS teacher_name
-            FROM lesson_students ls
-            JOIN lessons l ON l.id = ls.lesson_id
-            JOIN languages lang ON lang.id = l.language_id
-            JOIN users u ON u.id = ls.student_id
-            JOIN users t ON t.id = l.teacher_id
-            WHERE u.email = ?
-              AND EXTRACT(YEAR FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') = ?
-              AND EXTRACT(MONTH FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') = ?
-            ORDER BY l.scheduled_at ASC
-            """;
-
-        List<Map<String, Object>> rows = jdbc.queryForList(sql, email, year, month);
+        List<Map<String, Object>> rows;
+        if ("TEACHER".equals(role)) {
+            rows = jdbc.queryForList("""
+                SELECT
+                  EXTRACT(DAY FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') AS day,
+                  TO_CHAR(l.scheduled_at AT TIME ZONE 'Europe/Moscow', 'HH24:MI') AS time,
+                  lang.code AS lang,
+                  l.status,
+                  STRING_AGG(DISTINCT s.name, ', ') AS student_names
+                FROM lessons l
+                JOIN languages lang ON lang.id = l.language_id
+                JOIN users t ON t.id = l.teacher_id
+                LEFT JOIN lesson_students ls ON ls.lesson_id = l.id
+                LEFT JOIN users s ON s.id = ls.student_id
+                WHERE t.email = ?
+                  AND EXTRACT(YEAR FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') = ?
+                  AND EXTRACT(MONTH FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') = ?
+                GROUP BY l.id, l.scheduled_at, lang.code, l.status
+                ORDER BY l.scheduled_at ASC
+                """, email, year, month);
+        } else {
+            rows = jdbc.queryForList("""
+                SELECT
+                  EXTRACT(DAY FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') AS day,
+                  TO_CHAR(l.scheduled_at AT TIME ZONE 'Europe/Moscow', 'HH24:MI') AS time,
+                  lang.code AS lang,
+                  l.status,
+                  t.name AS teacher_name
+                FROM lesson_students ls
+                JOIN lessons l ON l.id = ls.lesson_id
+                JOIN languages lang ON lang.id = l.language_id
+                JOIN users u ON u.id = ls.student_id
+                JOIN users t ON t.id = l.teacher_id
+                WHERE u.email = ?
+                  AND EXTRACT(YEAR FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') = ?
+                  AND EXTRACT(MONTH FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') = ?
+                ORDER BY l.scheduled_at ASC
+                """, email, year, month);
+        }
 
         // Status mapping
         Map<String, String> statusMap = Map.of(
@@ -69,7 +95,7 @@ public class CalendarController {
             event.put("t", row.get("time"));
             event.put("l", row.get("lang"));
             event.put("s", mappedStatus);
-            event.put("who", row.get("teacher_name"));
+            event.put("who", "TEACHER".equals(role) ? row.get("student_names") : row.get("teacher_name"));
 
             grouped.computeIfAbsent(day, k -> new ArrayList<>()).add(event);
         }

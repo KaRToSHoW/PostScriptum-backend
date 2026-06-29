@@ -10,6 +10,7 @@ import ru.postscriptum.portal.dto.TeacherStudentDto;
 import ru.postscriptum.portal.service.TeacherService;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequiredArgsConstructor
@@ -35,11 +36,31 @@ public class TeacherController {
         return ResponseEntity.ok(teacherService.getMyStudents(email));
     }
 
+    @GetMapping("/api/teacher/earnings")
+    public ResponseEntity<?> getEarnings(@RequestParam(defaultValue = "MONTH") String period) {
+        String email = currentEmail();
+        return ResponseEntity.ok(teacherService.getEarnings(email, period));
+    }
+
     @PostMapping("/api/enrollments")
     public ResponseEntity<Void> enroll(@RequestBody EnrollRequest body) {
         String email = currentEmail();
         teacherService.enroll(email, body);
         return ResponseEntity.ok().build();
+    }
+
+    // ── Разовое занятие: договорились на конкретное время ────────────────────
+    @PostMapping("/api/teacher/lessons")
+    public ResponseEntity<?> createLesson(@RequestBody Map<String, Object> body) {
+        String email = currentEmail();
+        return teacherService.createLesson(email, body);
+    }
+
+    // ── Регулярные занятия: каждую неделю в одно и то же время ────────────────
+    @PostMapping("/api/teacher/lessons/recurring")
+    public ResponseEntity<?> createRecurringLessons(@RequestBody Map<String, Object> body) {
+        String email = currentEmail();
+        return teacherService.createRecurringLessons(email, body);
     }
 
     // ----------------------------------------------------------------

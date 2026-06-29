@@ -4,14 +4,10 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.support.GeneratedKeyHolder;
-import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
-import java.sql.PreparedStatement;
-import java.sql.Statement;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -76,24 +72,12 @@ public class AdminUsersController {
         String hash     = passwordEncoder.encode(password);
 
         try {
-            KeyHolder keyHolder = new GeneratedKeyHolder();
-            jdbc.update(con -> {
-                PreparedStatement ps = con.prepareStatement(
-                    "INSERT INTO users (name, email, initials, password_hash, role, " +
-                    "                  is_active, timezone, locale, created_at, updated_at) " +
-                    "VALUES (?, ?, ?, ?, ?::user_role, true, 'Europe/Moscow', 'ru', NOW(), NOW())",
-                    Statement.RETURN_GENERATED_KEYS
-                );
-                ps.setString(1, name);
-                ps.setString(2, email);
-                ps.setString(3, initials);
-                ps.setString(4, hash);
-                ps.setString(5, role);
-                return ps;
-            }, keyHolder);
-
-            Number newId = keyHolder.getKey();
-            long userId = newId != null ? newId.longValue() : 0L;
+            long userId = jdbc.queryForObject("""
+                INSERT INTO users (name, email, initials, password_hash, role,
+                                   is_active, timezone, locale, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?::user_role, true, 'Europe/Moscow', 'ru', NOW(), NOW())
+                RETURNING id
+                """, Long.class, name, email, initials, hash, role);
 
             if ("STUDENT".equals(role)) {
                 jdbc.update(

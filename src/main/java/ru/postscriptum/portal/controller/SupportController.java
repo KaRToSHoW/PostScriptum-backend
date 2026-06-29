@@ -1,0 +1,80 @@
+package ru.postscriptum.portal.controller;
+
+import lombok.RequiredArgsConstructor;
+import org.springframework.dao.EmptyResultDataAccessException;
+import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Чат с поддержкой: один персистентный диалог на пользователя, который при первом
+ * обращении автоматически закрепляется за наименее загруженным менеджером.
+ */
+@RestController
+@RequestMapping("/api/support")
+@RequiredArgsConstructor
+public class SupportController {
+
+    private final JdbcTemplate jdbc;
+
+    @PostMapping("/start")
+    public ResponseEntity<?> start(Authentication auth) {
+        if (auth == null) return ResponseEntity.status(401).build();
+
+        Long me = jdbc.queryForObject("SELECT id FROM users WHERE email = ?", Long.class, auth.getName());
+
+        Long existing = findExistingConversation(me);
+        if (existing != null) {
+            return ResponseEntity.ok(Map.of("conversationId", existing));
+        }
+
+        Long managerId = pickLeastLoadedManager();
+        if (managerId == null) {
+            return ResponseEntity.status(503).body(Map.of("message", "Нет доступных менеджеров поддержки"));
+        }
+
+        Long convId = jdbc.queryForObject(
+            "INSERT INTO conversations (support_owner_id, created_at) VALUES (?, NOW()) RETURNING id",
+            Long.class, me);
+        jdbc.update(
+            "INSERT INTO conversation_members (conversation_id, user_id) VALUES (?,?),(?,?)",
+            convId, me, convId, managerId);
+
+        jdbc.update("""
+            INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at)
+            SELECT ?, 'NEW_MESSAGE'::notification_type, 'Новое обращение в поддержку',
+                   u.name || ' начал(а) чат с поддержкой', '/messages', false, NOW()
+            FROM users u WHERE u.id = ?
+            """, managerId, me);
+
+        return ResponseEntity.ok(Map.of("conversationId", convId));
+    }
+
+    private Long findExistingConversation(long userId) {
+        try {
+            return jdbc.queryForObject(
+                "SELECT id FROM conversations WHERE support_owner_id = ?", Long.class, userId);
+        } catch (EmptyResultDataAccessException e) {
+            return null;
+        }
+    }
+
+    /** Сотрудник поддержки (MANAGER и ADMIN — один общий пул) с наименьшим числом закреплённых диалогов. */
+    private Long pickLeastLoadedManager() {
+        List<Long> candidates = jdbc.queryForList("""
+            SELECT u.id
+            FROM users u
+            LEFT JOIN conversation_members cm ON cm.user_id = u.id
+            LEFT JOIN conversations c ON c.id = cm.conversation_id AND c.support_owner_id IS NOT NULL
+            WHERE u.role IN ('MANAGER'::user_role, 'ADMIN'::user_role) AND u.is_active = true
+            GROUP BY u.id
+            ORDER BY COUNT(c.id) ASC, u.id ASC
+            LIMIT 1
+            """, Long.class);
+        return candidates.isEmpty() ? null : candidates.get(0);
+    }
+}

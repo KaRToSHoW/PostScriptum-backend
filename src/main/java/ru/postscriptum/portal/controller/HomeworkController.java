@@ -37,7 +37,8 @@ public class HomeworkController {
         }
 
         String sql = """
-            SELECT h.id, h.title, h.due_at, h.status, COALESCE(lang.code, 'fr') AS lang,
+            SELECT h.id, h.title, h.description, h.due_at, h.status, h.attachment_url,
+                   COALESCE(lang.code, 'fr') AS lang,
                    hs.grade, hs.feedback
             FROM homework h
             LEFT JOIN lessons l ON l.id = h.lesson_id
@@ -62,13 +63,15 @@ public class HomeworkController {
             }
 
             Map<String, Object> item = new LinkedHashMap<>();
-            item.put("id",       row.get("id"));
-            item.put("title",    row.get("title"));
-            item.put("due",      due);
-            item.put("status",   row.get("status"));
-            item.put("lang",     row.get("lang"));
-            item.put("grade",    row.get("grade"));
-            item.put("feedback", row.get("feedback"));
+            item.put("id",            row.get("id"));
+            item.put("title",         row.get("title"));
+            item.put("description",   row.get("description"));
+            item.put("due",           due);
+            item.put("status",        row.get("status"));
+            item.put("lang",          row.get("lang"));
+            item.put("grade",         row.get("grade"));
+            item.put("feedback",      row.get("feedback"));
+            item.put("attachmentUrl", row.get("attachment_url"));
             result.add(item);
         }
 
@@ -119,8 +122,8 @@ public class HomeworkController {
             "SELECT id FROM users WHERE email=?", Long.class, auth.getName());
 
         String sql = """
-            SELECT h.id, h.title, h.description, h.status, h.due_at,
-                   s.name AS student, s.initials AS student_initials,
+            SELECT h.id, h.title, h.description, h.status, h.due_at, h.attachment_url,
+                   s.id AS student_id, s.name AS student, s.initials AS student_initials,
                    COALESCE(lang.code,'fr') AS lang,
                    hs.text_content, hs.file_url, hs.submitted_at, hs.grade, hs.feedback
             FROM homework h
@@ -129,7 +132,7 @@ public class HomeworkController {
             LEFT JOIN languages lang ON lang.id = l.language_id
             LEFT JOIN homework_submissions hs ON hs.homework_id = h.id
             WHERE h.teacher_id = ?
-            ORDER BY (h.status='SUBMITTED'::homework_status) DESC, h.due_at ASC
+            ORDER BY s.name ASC, (h.status='SUBMITTED'::homework_status) DESC, h.due_at ASC
             """;
 
         List<Map<String, Object>> rows = jdbc.queryForList(sql, me);
@@ -158,11 +161,13 @@ public class HomeworkController {
             item.put("description",     row.get("description"));
             item.put("status",          row.get("status"));
             item.put("due",             due);
+            item.put("studentId",       row.get("student_id"));
             item.put("student",         row.get("student"));
             item.put("studentInitials", row.get("student_initials"));
             item.put("lang",            row.get("lang"));
             item.put("text",            row.get("text_content"));
             item.put("fileUrl",         row.get("file_url"));
+            item.put("attachmentUrl",   row.get("attachment_url"));
             item.put("submittedAt",     submittedAt);
             item.put("grade",           row.get("grade"));
             item.put("feedback",        row.get("feedback"));
@@ -225,11 +230,11 @@ public class HomeworkController {
         }
 
         Long newId = jdbc.queryForObject("""
-            INSERT INTO homework (lesson_id, teacher_id, student_id, title, description, due_at, status, created_at)
-            VALUES (?,?,?,?,?,?,'ASSIGNED'::homework_status, NOW()) RETURNING id
+            INSERT INTO homework (lesson_id, teacher_id, student_id, title, description, due_at, attachment_url, status, created_at)
+            VALUES (?,?,?,?,?,?,?,'ASSIGNED'::homework_status, NOW()) RETURNING id
             """, Long.class,
             lessonId, me, studentId,
-            body.get("title"), body.get("description"), due);
+            body.get("title"), body.get("description"), due, body.get("attachmentUrl"));
 
         jdbc.update("""
             INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at)
