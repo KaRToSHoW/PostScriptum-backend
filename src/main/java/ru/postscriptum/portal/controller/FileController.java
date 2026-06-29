@@ -34,9 +34,11 @@ public class FileController {
         return ResponseEntity.ok(storage.store(file, userId, purpose));
     }
 
-    /** Отдача файла по storage_name. Доступно без авторизации (ссылки в img src). */
+    /** Отдача файла по storage_name (только для файлов, сохранённых локально до перехода на S3).
+        Доступно без авторизации (ссылки в img src). Новые файлы в Timeweb S3 отдаются прямой ссылкой. */
     @GetMapping("/{name}")
     public ResponseEntity<Resource> serve(@PathVariable String name) {
+        if (storage.isS3Enabled()) return ResponseEntity.notFound().build();
         try {
             Path path = storage.resolve(name);
             if (!Files.exists(path)) return ResponseEntity.notFound().build();
