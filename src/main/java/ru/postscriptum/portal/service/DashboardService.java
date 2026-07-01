@@ -94,13 +94,12 @@ public class DashboardService {
         } catch (EmptyResultDataAccessException ignored) {}
         result.put("subscription", subscription);
 
-        // courses
+        // courses (enrollments → languages, no courses table)
         List<Map<String, Object>> courseRows = jdbc.queryForList(
                 "SELECT e.id, l.name_ru AS language, l.code AS lang, " +
-                "       u.name AS teacher, e.progress_pct AS progress " +
+                "       u.name AS teacher " +
                 "FROM enrollments e " +
-                "JOIN courses c ON c.id = e.course_id " +
-                "JOIN languages l ON l.id = c.language_id " +
+                "JOIN languages l ON l.id = e.language_id " +
                 "JOIN users u ON u.id = e.teacher_id " +
                 "WHERE e.student_id = ? AND e.is_active = true",
                 studentId);
@@ -112,8 +111,7 @@ public class DashboardService {
             course.put("language", row.get("language"));
             course.put("lang",     row.get("lang"));
             course.put("teacher",  row.get("teacher"));
-            course.put("nextDate", null);  // populated below if schedule found
-            course.put("progress", row.get("progress"));
+            course.put("nextDate", null);
             courses.add(course);
         }
         result.put("courses", courses);
@@ -203,10 +201,10 @@ public class DashboardService {
     public Map<String, Object> getTeacherDashboard(Long teacherId) {
         Map<String, Object> result = new LinkedHashMap<>();
 
-        // schedule — upcoming planned lessons for this teacher
+        // schedule — upcoming planned lessons for this teacher (next 7 days)
         List<Map<String, Object>> scheduleRows = jdbc.queryForList(
                 "SELECT l.scheduled_at, l.duration_min, l.status, " +
-                "       u.name AS student, lang.code AS lang " +
+                "       u.name AS student, u.initials AS student_initials, lang.code AS lang " +
                 "FROM lessons l " +
                 "JOIN lesson_students ls ON ls.lesson_id = l.id " +
                 "JOIN users u ON u.id = ls.student_id " +
@@ -214,9 +212,12 @@ public class DashboardService {
                 "WHERE l.teacher_id = ? " +
                 "  AND l.status = 'PLANNED' " +
                 "  AND l.scheduled_at > NOW() " +
-                "ORDER BY l.scheduled_at ASC " +
-                "LIMIT 20",
+                "  AND l.scheduled_at < NOW() + INTERVAL '7 days' " +
+                "ORDER BY l.scheduled_at ASC",
                 teacherId);
+
+        DateTimeFormatter DATE_KEY = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+        String[] MONTH_SHORT = {"янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"};
 
         List<Map<String, Object>> schedule = new ArrayList<>();
         for (Map<String, Object> row : scheduleRows) {
@@ -227,12 +228,17 @@ public class DashboardService {
                     ? ((Number) row.get("duration_min")).intValue() : 60;
             OffsetDateTime dtEnd = dt.plusMinutes(dur);
 
+            String monthShort = MONTH_SHORT[dt.getMonthValue() - 1];
+
             Map<String, Object> item = new LinkedHashMap<>();
+            item.put("dateKey",  dt.format(DATE_KEY));
             item.put("date",     String.valueOf(dt.getDayOfMonth()));
+            item.put("month",    monthShort);
             item.put("dayLabel", dayLabel(dt));
             item.put("timeFrom", dt.format(HH_MM));
             item.put("timeTo",   dtEnd.format(HH_MM));
             item.put("student",  row.get("student"));
+            item.put("studentInitials", row.get("student_initials"));
             item.put("lang",     row.get("lang"));
             item.put("status",   row.get("status"));
             schedule.add(item);

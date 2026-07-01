@@ -124,12 +124,13 @@ public class HomeworkController {
         String sql = """
             SELECT h.id, h.title, h.description, h.status, h.due_at, h.attachment_url,
                    s.id AS student_id, s.name AS student, s.initials AS student_initials,
-                   COALESCE(lang.code,'fr') AS lang,
+                   COALESCE(llang.code, hlang.code, 'fr') AS lang,
                    hs.text_content, hs.file_url, hs.submitted_at, hs.grade, hs.feedback
             FROM homework h
             JOIN users s ON s.id = h.student_id
             LEFT JOIN lessons l ON l.id = h.lesson_id
-            LEFT JOIN languages lang ON lang.id = l.language_id
+            LEFT JOIN languages llang ON llang.id = l.language_id
+            LEFT JOIN languages hlang ON hlang.id = h.language_id
             LEFT JOIN homework_submissions hs ON hs.homework_id = h.id
             WHERE h.teacher_id = ?
             ORDER BY s.name ASC, (h.status='SUBMITTED'::homework_status) DESC, h.due_at ASC
@@ -229,12 +230,20 @@ public class HomeworkController {
             due = java.sql.Timestamp.valueOf(normalized);
         }
 
+        String languageCode = (String) body.get("languageCode");
+        Long langId = null;
+        if (languageCode != null && !languageCode.isBlank()) {
+            try {
+                langId = jdbc.queryForObject("SELECT id FROM languages WHERE code=?", Long.class, languageCode);
+            } catch (Exception ignored) {}
+        }
+
         Long newId = jdbc.queryForObject("""
-            INSERT INTO homework (lesson_id, teacher_id, student_id, title, description, due_at, attachment_url, status, created_at)
-            VALUES (?,?,?,?,?,?,?,'ASSIGNED'::homework_status, NOW()) RETURNING id
+            INSERT INTO homework (lesson_id, teacher_id, student_id, title, description, due_at, attachment_url, language_id, status, created_at)
+            VALUES (?,?,?,?,?,?,?,?,'ASSIGNED'::homework_status, NOW()) RETURNING id
             """, Long.class,
             lessonId, me, studentId,
-            body.get("title"), body.get("description"), due, body.get("attachmentUrl"));
+            body.get("title"), body.get("description"), due, body.get("attachmentUrl"), langId);
 
         jdbc.update("""
             INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at)

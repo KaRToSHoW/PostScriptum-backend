@@ -26,7 +26,7 @@ public class MessagesController {
         String email = auth.getName();
 
         String sql = """
-            SELECT c.id AS conv_id, u.id AS user_id, u.name, u.initials,
+            SELECT c.id AS conv_id, u.id AS user_id, u.name, u.initials, u.role AS role,
                    (SELECT m.body FROM messages m WHERE m.conversation_id = c.id ORDER BY m.sent_at DESC LIMIT 1) AS last_msg,
                    (SELECT m.sent_at FROM messages m WHERE m.conversation_id = c.id ORDER BY m.sent_at DESC LIMIT 1) AS last_ts,
                    (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_id != me.id AND m.is_read = false) AS unread
@@ -47,6 +47,7 @@ public class MessagesController {
             item.put("id",       row.get("conv_id"));
             item.put("name",     row.get("name"));
             item.put("initials", row.get("initials"));
+            item.put("role",     row.get("role"));
             item.put("lastMsg",  crypto.decrypt((String) row.get("last_msg")));
             item.put("lastTs",   row.get("last_ts"));
             item.put("unread",   row.get("unread"));
@@ -62,7 +63,7 @@ public class MessagesController {
 
         String sql = """
             SELECT m.id, m.body, m.sent_at, m.is_read, m.is_system,
-                   u.id AS sender_id, u.name AS sender_name, u.email AS sender_email
+                   u.id AS sender_id, u.name AS sender_name, u.email AS sender_email, u.role AS sender_role
             FROM messages m JOIN users u ON u.id = m.sender_id
             WHERE m.conversation_id = ?
             ORDER BY m.sent_at ASC
@@ -81,6 +82,7 @@ public class MessagesController {
             item.put("senderId",    row.get("sender_id"));
             item.put("senderName",  row.get("sender_name"));
             item.put("senderEmail", row.get("sender_email"));
+            item.put("senderRole",  row.get("sender_role"));
             result.add(item);
         }
 
@@ -95,9 +97,10 @@ public class MessagesController {
         Integer member = jdbc.queryForObject("SELECT COUNT(*) FROM conversation_members WHERE conversation_id=? AND user_id=?", Integer.class, convId, me);
         if (member == 0) return ResponseEntity.status(403).build();
         String plainBody = body.get("body");
+        String encBody = crypto.encrypt(plainBody);
         Long id = jdbc.queryForObject(
             "INSERT INTO messages (conversation_id, sender_id, body, is_read, sent_at) VALUES (?,?,?,false,NOW()) RETURNING id",
-            Long.class, convId, me, crypto.encrypt(plainBody));
+            Long.class, convId, me, encBody);
         // notify the other member(s) — превью уведомления остаётся читаемым, само сообщение в БД зашифровано
         jdbc.update("""
             INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at)
@@ -105,6 +108,49 @@ public class MessagesController {
             FROM conversation_members cm WHERE cm.conversation_id = ? AND cm.user_id != ?
             """, (Object) (jdbc.queryForObject("SELECT name FROM users WHERE id=?", String.class, me)),
             plainBody, convId, me);
+        // If sender is MANAGER, copy message to related conversations
+        String senderRole = jdbc.queryForObject("SELECT role FROM users WHERE id=?", String.class, me);
+        if ("MANAGER".equals(senderRole)) {
+            // Get other members of this conversation
+            List<Long> others = jdbc.queryForList(
+                "SELECT user_id FROM conversation_members WHERE conversation_id=? AND user_id!=?",
+                Long.class, convId, me);
+            for (Long otherId : others) {
+                String otherRole = jdbc.queryForObject("SELECT role FROM users WHERE id=?", String.class, otherId);
+                List<Long> relatedIds = new ArrayList<>();
+                if ("STUDENT".equals(otherRole)) {
+                    relatedIds = jdbc.queryForList(
+                        "SELECT DISTINCT teacher_id FROM enrollments WHERE student_id=? AND is_active=true",
+                        Long.class, otherId);
+                } else if ("TEACHER".equals(otherRole)) {
+                    relatedIds = jdbc.queryForList(
+                        "SELECT DISTINCT student_id FROM enrollments WHERE teacher_id=? AND is_active=true",
+                        Long.class, otherId);
+                }
+                for (Long relId : relatedIds) {
+                    // find or create conversation between otherId and relId
+                    List<Long> existing = jdbc.queryForList("""
+                        SELECT cm.conversation_id FROM conversation_members cm
+                        WHERE cm.user_id IN (?,?)
+                        GROUP BY cm.conversation_id
+                        HAVING COUNT(DISTINCT cm.user_id)=2
+                           AND COUNT(*)=(SELECT COUNT(*) FROM conversation_members x WHERE x.conversation_id=cm.conversation_id)
+                        """, Long.class, otherId, relId);
+                    Long targetConvId;
+                    if (!existing.isEmpty()) {
+                        targetConvId = existing.get(0);
+                    } else {
+                        targetConvId = jdbc.queryForObject("INSERT INTO conversations DEFAULT VALUES RETURNING id", Long.class);
+                        jdbc.update("INSERT INTO conversation_members(conversation_id,user_id) VALUES(?,?),(?,?)",
+                            targetConvId, otherId, targetConvId, relId);
+                    }
+                    if (!targetConvId.equals(convId)) {
+                        jdbc.update("INSERT INTO messages(conversation_id,sender_id,body,is_read,sent_at) VALUES(?,?,?,false,NOW())",
+                            targetConvId, me, encBody);
+                    }
+                }
+            }
+        }
         return ResponseEntity.ok(Map.of("id", id));
     }
 

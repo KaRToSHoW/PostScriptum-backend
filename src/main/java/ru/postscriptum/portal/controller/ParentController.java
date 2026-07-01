@@ -25,7 +25,9 @@ public class ParentController {
         List<Map<String, Object>> rows = jdbc.queryForList(
             "SELECT u.id, u.name, u.initials, " +
             "       (SELECT COUNT(*) FROM enrollments e WHERE e.student_id=u.id AND e.is_active) AS courses, " +
-            "       (SELECT ROUND(AVG(e.progress_pct)) FROM enrollments e WHERE e.student_id=u.id) AS progress, " +
+            "       (SELECT STRING_AGG(DISTINCT l.code, ',') " +
+            "          FROM enrollments e JOIN languages l ON l.id = e.language_id " +
+            "          WHERE e.student_id=u.id AND e.is_active) AS lang_codes, " +
             "       sp.streak_days " +
             "FROM users u " +
             "JOIN student_profiles sp ON sp.user_id = u.id " +
@@ -37,12 +39,12 @@ public class ParentController {
         List<Map<String, Object>> result = new ArrayList<>();
         for (Map<String, Object> row : rows) {
             Map<String, Object> child = new LinkedHashMap<>();
-            child.put("id",       row.get("id"));
-            child.put("name",     row.get("name"));
-            child.put("initials", row.get("initials"));
-            child.put("courses",  row.get("courses") != null ? row.get("courses") : 0);
-            child.put("progress", row.get("progress") != null ? row.get("progress") : 0);
-            child.put("streak",   row.get("streak_days") != null ? row.get("streak_days") : 0);
+            child.put("id",        row.get("id"));
+            child.put("name",      row.get("name"));
+            child.put("initials",  row.get("initials"));
+            child.put("courses",   row.get("courses") != null ? row.get("courses") : 0);
+            child.put("langCodes", row.get("lang_codes") != null ? row.get("lang_codes").toString().split(",") : new String[0]);
+            child.put("streak",    row.get("streak_days") != null ? row.get("streak_days") : 0);
             result.add(child);
         }
         return ResponseEntity.ok(result);

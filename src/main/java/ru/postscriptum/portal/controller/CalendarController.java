@@ -121,10 +121,12 @@ public class CalendarController {
     @GetMapping("/admin")
     public ResponseEntity<?> admin(
             @RequestParam(defaultValue = "2026") int year,
-            @RequestParam(defaultValue = "5")    int month) {
+            @RequestParam(defaultValue = "5")    int month,
+            @RequestParam(required = false)      Long teacherId) {
 
-        String sql = """
+        StringBuilder sqlBuilder = new StringBuilder("""
             SELECT
+              l.id AS lesson_id,
               EXTRACT(DAY FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') AS day,
               TO_CHAR(l.scheduled_at AT TIME ZONE 'Europe/Moscow', 'HH24:MI') AS time,
               lang.code AS lang,
@@ -141,11 +143,17 @@ public class CalendarController {
             LEFT JOIN users s ON s.id = ls.student_id
             WHERE EXTRACT(YEAR FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') = ?
               AND EXTRACT(MONTH FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') = ?
+            """);
+        if (teacherId != null) sqlBuilder.append("  AND l.teacher_id = ?\n");
+        sqlBuilder.append("""
             GROUP BY l.id, l.scheduled_at, lang.code, l.status, t.name, r.name
             ORDER BY l.scheduled_at ASC
-            """;
+            """);
+        String sql = sqlBuilder.toString();
 
-        List<Map<String, Object>> rows = jdbc.queryForList(sql, year, month);
+        List<Map<String, Object>> rows = teacherId != null
+            ? jdbc.queryForList(sql, year, month, teacherId)
+            : jdbc.queryForList(sql, year, month);
 
         Map<String, String> statusMap = Map.of(
             "DONE",        "done",
@@ -163,6 +171,7 @@ public class CalendarController {
             String mappedStatus = statusMap.getOrDefault(rawStatus != null ? rawStatus : "", rawStatus);
 
             Map<String, Object> event = new LinkedHashMap<>();
+            event.put("id",  row.get("lesson_id"));
             event.put("t", row.get("time"));
             event.put("l", row.get("lang"));
             event.put("s", mappedStatus);

@@ -150,15 +150,15 @@ public class TeacherService {
         }
 
         String sql = """
-            SELECT e.student_id, u.name, u.initials,
-                   lang.name_ru AS language, lang.code AS lang,
-                   lv.code AS level, e.progress_pct, e.is_active
+            SELECT e.student_id, u.name, u.initials, u.email,
+                   STRING_AGG(lang.name_ru, ',' ORDER BY lang.name_ru) AS languages,
+                   STRING_AGG(lang.code, ',' ORDER BY lang.name_ru) AS lang_codes,
+                   bool_or(e.is_active) AS is_active
             FROM enrollments e
             JOIN users u ON u.id = e.student_id
-            JOIN courses c ON c.id = e.course_id
-            JOIN languages lang ON lang.id = c.language_id
-            LEFT JOIN levels lv ON lv.id = c.level_id
+            JOIN languages lang ON lang.id = e.language_id
             WHERE e.teacher_id = ?
+            GROUP BY e.student_id, u.name, u.initials, u.email
             ORDER BY u.name
             """;
 
@@ -199,16 +199,20 @@ public class TeacherService {
                 studentId,
                 (String) row.get("name"),
                 (String) row.get("initials"),
-                (String) row.get("language"),
-                (String) row.get("lang"),
-                (String) row.get("level"),
-                ((Number) row.get("progress_pct")).intValue(),
+                (String) row.get("email"),
+                splitOrEmpty((String) row.get("languages")),
+                splitOrEmpty((String) row.get("lang_codes")),
                 isActive ? "ACTIVE" : "COMPLETED",
                 nextLesson,
                 lessonsLeft
             ));
         }
         return result;
+    }
+
+    private static List<String> splitOrEmpty(String s) {
+        if (s == null || s.isBlank()) return List.of();
+        return Arrays.asList(s.split(","));
     }
 
     public void enroll(String studentEmail, EnrollRequest req) {
@@ -314,8 +318,9 @@ public class TeacherService {
         }
         long studentId = ((Number) studentIdObj).longValue();
         int durationMin = body.get("durationMin") != null ? ((Number) body.get("durationMin")).intValue() : 60;
+        String languageCode = (String) body.get("languageCode");
 
-        Map<String, Object> enrollment = resolveEnrollment(teacherId, studentId);
+        Map<String, Object> enrollment = resolveEnrollment(teacherId, studentId, languageCode);
         if (enrollment == null) {
             return ResponseEntity.badRequest().body(Map.of("message", "У этого ученика нет активного курса с вами"));
         }
@@ -377,8 +382,9 @@ public class TeacherService {
         int dayOfWeek = ((Number) dayOfWeekObj).intValue();
         int durationMin = body.get("durationMin") != null ? ((Number) body.get("durationMin")).intValue() : 60;
         int weeksCount = body.get("weeksCount") != null ? ((Number) body.get("weeksCount")).intValue() : 8;
+        String languageCode = (String) body.get("languageCode");
 
-        Map<String, Object> enrollment = resolveEnrollment(teacherId, studentId);
+        Map<String, Object> enrollment = resolveEnrollment(teacherId, studentId, languageCode);
         if (enrollment == null) {
             return ResponseEntity.badRequest().body(Map.of("message", "У этого ученика нет активного курса с вами"));
         }
@@ -427,8 +433,9 @@ public class TeacherService {
         }
         long studentId = ((Number) studentIdObj).longValue();
         int durationMin = body.get("durationMin") != null ? ((Number) body.get("durationMin")).intValue() : 60;
+        String languageCode = (String) body.get("languageCode");
 
-        Map<String, Object> enrollment = resolveEnrollment(teacherId, studentId);
+        Map<String, Object> enrollment = resolveEnrollment(teacherId, studentId, languageCode);
         if (enrollment == null) {
             return ResponseEntity.badRequest().body(Map.of("message", "У этого ученика нет активного курса с вами"));
         }
@@ -471,13 +478,25 @@ public class TeacherService {
         }
     }
 
-    /** Находит активную запись на курс у ученика с этим преподавателем (для language_id/enrollment_id). */
+    /** Находит активную запись у ученика с этим преподавателем, опционально фильтруя по language code. */
     private Map<String, Object> resolveEnrollment(long teacherId, long studentId) {
+        return resolveEnrollment(teacherId, studentId, null);
+    }
+
+    private Map<String, Object> resolveEnrollment(long teacherId, long studentId, String languageCode) {
         try {
+            if (languageCode != null && !languageCode.isBlank()) {
+                return jdbc.queryForMap("""
+                    SELECT e.id AS enrollment_id, e.language_id
+                    FROM enrollments e
+                    JOIN languages l ON l.id = e.language_id
+                    WHERE e.teacher_id = ? AND e.student_id = ? AND l.code = ? AND e.is_active = true
+                    ORDER BY e.id DESC LIMIT 1
+                    """, teacherId, studentId, languageCode);
+            }
             return jdbc.queryForMap("""
-                SELECT e.id AS enrollment_id, c.language_id
+                SELECT e.id AS enrollment_id, e.language_id
                 FROM enrollments e
-                JOIN courses c ON c.id = e.course_id
                 WHERE e.teacher_id = ? AND e.student_id = ? AND e.is_active = true
                 ORDER BY e.id DESC LIMIT 1
                 """, teacherId, studentId);

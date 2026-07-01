@@ -17,8 +17,8 @@ public class Enrollment {
     @JoinColumn(name = "student_id", nullable = false)
     private User student;
 
-    @Column(name = "course_id", nullable = false)
-    private Integer courseId;
+    @Column(name = "language_id", nullable = false)
+    private Integer languageId;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "teacher_id")
@@ -29,9 +29,6 @@ public class Enrollment {
 
     @Column(name = "end_date")
     private LocalDate endDate;
-
-    @Column(name = "progress_pct", nullable = false)
-    private short progressPct = 0;
 
     @Column(name = "lessons_done", nullable = false)
     private short lessonsDone = 0;

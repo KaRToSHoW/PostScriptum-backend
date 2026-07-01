@@ -48,55 +48,22 @@ public class AssignmentController {
                 return ResponseEntity.badRequest().body(Map.of("message", "Язык не найден: " + languageCode));
             }
 
-            // 2. Find or create course
-            Long courseId;
-            List<Map<String, Object>> courses = jdbc.queryForList(
-                "SELECT id FROM courses WHERE language_id=? ORDER BY id LIMIT 1", languageId
-            );
-            if (!courses.isEmpty()) {
-                courseId = toLong(courses.get(0).get("id"));
-            } else {
-                // get language name for title
-                String nameRu;
-                try {
-                    nameRu = jdbc.queryForObject(
-                        "SELECT name_ru FROM languages WHERE id=?", String.class, languageId
-                    );
-                } catch (EmptyResultDataAccessException e) {
-                    nameRu = languageCode;
-                }
-                final String title = nameRu + " — курс";
-                final Long langId = languageId;
-                KeyHolder kh = new GeneratedKeyHolder();
-                jdbc.update(con -> {
-                    PreparedStatement ps = con.prepareStatement(
-                        "INSERT INTO courses (language_id, title, total_lessons, is_active) " +
-                        "VALUES (?, ?, 0, true)",
-                        Statement.RETURN_GENERATED_KEYS
-                    );
-                    ps.setLong(1, langId);
-                    ps.setString(2, title);
-                    return ps;
-                }, kh);
-                courseId = kh.getKey().longValue();
-            }
-
-            // 3. Check existing enrollment
+            // 2. Check existing enrollment for this student+teacher+language
             List<Map<String, Object>> existing = jdbc.queryForList(
-                "SELECT id FROM enrollments WHERE student_id=? AND course_id=?",
-                studentId, courseId
+                "SELECT id FROM enrollments WHERE student_id=? AND teacher_id=? AND language_id=?",
+                studentId, teacherId, languageId
             );
             if (!existing.isEmpty()) {
                 jdbc.update(
-                    "UPDATE enrollments SET teacher_id=? WHERE student_id=? AND course_id=?",
-                    teacherId, studentId, courseId
+                    "UPDATE enrollments SET is_active=true WHERE student_id=? AND teacher_id=? AND language_id=?",
+                    studentId, teacherId, languageId
                 );
             } else {
                 jdbc.update(
-                    "INSERT INTO enrollments (student_id, course_id, teacher_id, start_date, " +
-                    "                        progress_pct, lessons_done, lessons_total, is_active) " +
-                    "VALUES (?, ?, ?, NOW()::date, 0, 0, 0, true)",
-                    studentId, courseId, teacherId
+                    "INSERT INTO enrollments (student_id, teacher_id, language_id, start_date, " +
+                    "                        lessons_done, lessons_total, is_active) " +
+                    "VALUES (?, ?, ?, NOW()::date, 0, 0, true)",
+                    studentId, teacherId, languageId
                 );
             }
 

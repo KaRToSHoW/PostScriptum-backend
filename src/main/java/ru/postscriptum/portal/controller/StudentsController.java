@@ -28,7 +28,9 @@ public class StudentsController {
             "       (SELECT STRING_AGG(DISTINCT t.name, ', ') " +
             "          FROM enrollments e JOIN users t ON t.id = e.teacher_id " +
             "          WHERE e.student_id = u.id) AS teachers, " +
-            "       (SELECT ROUND(AVG(e.progress_pct)) FROM enrollments e WHERE e.student_id = u.id) AS avg_progress " +
+            "       (SELECT STRING_AGG(DISTINCT l.name_ru, ', ') " +
+            "          FROM enrollments e JOIN languages l ON l.id = e.language_id " +
+            "          WHERE e.student_id = u.id AND e.is_active) AS languages " +
             "FROM users u " +
             "LEFT JOIN student_profiles sp ON sp.user_id = u.id " +
             "LEFT JOIN users p ON p.id = sp.parent_id " +
@@ -44,8 +46,7 @@ public class StudentsController {
                 row.put("parentName", rs.getString("parent_name"));
                 row.put("courses", rs.getLong("courses"));
                 row.put("teachers", rs.getString("teachers"));
-                long avgProgress = rs.getLong("avg_progress");
-                row.put("progress", rs.wasNull() ? 0 : avgProgress);
+                row.put("languages", rs.getString("languages"));
                 return row;
             }
         );
