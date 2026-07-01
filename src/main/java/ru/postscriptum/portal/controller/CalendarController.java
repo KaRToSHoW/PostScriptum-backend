@@ -39,8 +39,10 @@ public class CalendarController {
         if ("TEACHER".equals(role)) {
             rows = jdbc.queryForList("""
                 SELECT
+                  l.id AS lesson_id,
                   EXTRACT(DAY FROM l.scheduled_at AT TIME ZONE 'Europe/Moscow') AS day,
                   TO_CHAR(l.scheduled_at AT TIME ZONE 'Europe/Moscow', 'HH24:MI') AS time,
+                  l.scheduled_at,
                   lang.code AS lang,
                   l.status,
                   STRING_AGG(DISTINCT s.name, ', ') AS student_names
@@ -96,6 +98,11 @@ public class CalendarController {
             event.put("l", row.get("lang"));
             event.put("s", mappedStatus);
             event.put("who", "TEACHER".equals(role) ? row.get("student_names") : row.get("teacher_name"));
+            if ("TEACHER".equals(role)) {
+                event.put("id", row.get("lesson_id"));
+                Object ts = row.get("scheduled_at");
+                event.put("scheduledAt", ts != null ? ts.toString() : null);
+            }
 
             grouped.computeIfAbsent(day, k -> new ArrayList<>()).add(event);
         }

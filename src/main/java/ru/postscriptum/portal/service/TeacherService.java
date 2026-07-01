@@ -29,6 +29,7 @@ public class TeacherService {
 
     private final UserRepository userRepository;
     private final JdbcTemplate jdbc;
+    private final MessageCryptoService crypto;
 
     public List<TeacherDto> listTeachers(String currentUserEmail) {
         String sql = """
@@ -184,6 +185,16 @@ public class TeacherService {
 
             boolean isActive = Boolean.TRUE.equals(row.get("is_active"));
 
+            Integer lessonsLeft = null;
+            try {
+                lessonsLeft = jdbc.queryForObject("""
+                    SELECT (lessons_total - lessons_used)
+                    FROM subscriptions
+                    WHERE student_id = ? AND status = 'ACTIVE'
+                    ORDER BY created_at DESC LIMIT 1
+                    """, Integer.class, studentId);
+            } catch (Exception ignore) {}
+
             result.add(new TeacherStudentDto(
                 studentId,
                 (String) row.get("name"),
@@ -193,7 +204,8 @@ public class TeacherService {
                 (String) row.get("level"),
                 ((Number) row.get("progress_pct")).intValue(),
                 isActive ? "ACTIVE" : "COMPLETED",
-                nextLesson
+                nextLesson,
+                lessonsLeft
             ));
         }
         return result;
@@ -315,11 +327,37 @@ public class TeacherService {
             return ResponseEntity.badRequest().body(Map.of("message", "Некорректный формат времени"));
         }
 
+        if (hasConflict(teacherId, scheduledAt, durationMin, null)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "На это время у вас уже есть урок — выберите другое время"));
+        }
+
         long lessonId = insertLesson(teacherId, enrollment, scheduledAt, durationMin);
         notifyStudent(studentId, "Назначено новое занятие",
             "У вас занятие " + scheduledAt.format(DateTimeFormatter.ofPattern("dd.MM в HH:mm")));
 
         return ResponseEntity.ok(Map.of("id", lessonId));
+    }
+
+    /** Есть ли у преподавателя уже урок, пересекающийся по времени с [start, start+durationMin). */
+    private boolean hasConflict(long teacherId, ZonedDateTime start, int durationMin, Long excludeLessonId) {
+        Timestamp startTs = Timestamp.from(start.toInstant());
+        Integer conflicts;
+        if (excludeLessonId == null) {
+            conflicts = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM lessons
+                WHERE teacher_id = ? AND status = 'PLANNED'::lesson_status
+                  AND scheduled_at < (?::timestamptz + (? || ' minutes')::interval)
+                  AND (scheduled_at + (duration_min || ' minutes')::interval) > ?::timestamptz
+                """, Integer.class, teacherId, startTs, durationMin, startTs);
+        } else {
+            conflicts = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM lessons
+                WHERE teacher_id = ? AND status = 'PLANNED'::lesson_status AND id != ?
+                  AND scheduled_at < (?::timestamptz + (? || ' minutes')::interval)
+                  AND (scheduled_at + (duration_min || ' minutes')::interval) > ?::timestamptz
+                """, Integer.class, teacherId, excludeLessonId, startTs, durationMin, startTs);
+        }
+        return conflicts != null && conflicts > 0;
     }
 
     /** Регулярные занятия — каждую неделю в одно и то же время на несколько недель вперёд. */
@@ -353,16 +391,75 @@ public class TeacherService {
         }
 
         List<Long> createdIds = new ArrayList<>();
+        List<String> skipped = new ArrayList<>();
         for (int i = 0; i < weeksCount; i++) {
             ZonedDateTime scheduledAt = firstDate.plusWeeks(i).atTime(lt).atZone(MOSCOW);
+            if (hasConflict(teacherId, scheduledAt, durationMin, null)) {
+                skipped.add(scheduledAt.format(DateTimeFormatter.ofPattern("dd.MM")));
+                continue;
+            }
             createdIds.add(insertLesson(teacherId, enrollment, scheduledAt, durationMin));
+        }
+
+        if (createdIds.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "На все эти даты у вас уже есть уроки — выберите другое время"));
         }
 
         String[] DAYS_RU = {"", "понедельникам", "вторникам", "средам", "четвергам", "пятницам", "субботам", "воскресеньям"};
         notifyStudent(studentId, "Назначены регулярные занятия",
             "Каждую неделю по " + DAYS_RU[dayOfWeek] + " в " + time + " — на " + weeksCount + " недель вперёд");
 
-        return ResponseEntity.ok(Map.of("createdCount", createdIds.size(), "ids", createdIds));
+        return ResponseEntity.ok(Map.of("createdCount", createdIds.size(), "ids", createdIds, "skipped", skipped));
+    }
+
+    /** Занятия по конкретным датам — преподаватель выбрал даты вручную в календаре. */
+    public ResponseEntity<?> createBatchLessons(String teacherEmail, Map<String, Object> body) {
+        if (teacherEmail == null) return ResponseEntity.status(401).build();
+        Long teacherId = resolveTeacherId(teacherEmail);
+        if (teacherId == null) return ResponseEntity.status(403).build();
+
+        Object studentIdObj = body.get("studentId");
+        @SuppressWarnings("unchecked")
+        List<String> dates = (List<String>) body.get("dates");  // ["YYYY-MM-DD", ...]
+        String time = (String) body.get("time");
+        if (studentIdObj == null || dates == null || dates.isEmpty() || time == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Не указан ученик, даты или время"));
+        }
+        long studentId = ((Number) studentIdObj).longValue();
+        int durationMin = body.get("durationMin") != null ? ((Number) body.get("durationMin")).intValue() : 60;
+
+        Map<String, Object> enrollment = resolveEnrollment(teacherId, studentId);
+        if (enrollment == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "У этого ученика нет активного курса с вами"));
+        }
+
+        LocalTime lt = LocalTime.parse(time);
+        List<Long> createdIds = new ArrayList<>();
+        List<String> skipped = new ArrayList<>();
+
+        for (String dateStr : dates) {
+            LocalDate date;
+            try {
+                date = LocalDate.parse(dateStr);
+            } catch (Exception e) {
+                skipped.add(dateStr);
+                continue;
+            }
+            ZonedDateTime scheduledAt = date.atTime(lt).atZone(MOSCOW);
+            if (hasConflict(teacherId, scheduledAt, durationMin, null)) {
+                skipped.add(date.format(DateTimeFormatter.ofPattern("dd.MM")));
+                continue;
+            }
+            createdIds.add(insertLesson(teacherId, enrollment, scheduledAt, durationMin));
+        }
+
+        if (createdIds.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "На все выбранные даты у вас уже есть уроки"));
+        }
+
+        notifyStudent(studentId, "Назначены занятия",
+            "Назначено " + createdIds.size() + " занятий по выбранным датам");
+        return ResponseEntity.ok(Map.of("createdCount", createdIds.size(), "ids", createdIds, "skipped", skipped));
     }
 
     private Long resolveTeacherId(String teacherEmail) {
@@ -422,5 +519,260 @@ public class TeacherService {
         } catch (Exception e) {
             return java.time.LocalDateTime.parse(iso).atZone(MOSCOW);
         }
+    }
+
+    private static final long CANCEL_FREE_WINDOW_HOURS = 4;
+
+    /** Отмена занятия преподавателем. Если до урока меньше 4 часов — урок считается проведённым (списывается). */
+    public ResponseEntity<?> cancelLesson(String teacherEmail, long lessonId, Map<String, Object> body) {
+        if (teacherEmail == null) return ResponseEntity.status(401).build();
+        Long teacherId = resolveTeacherId(teacherEmail);
+        if (teacherId == null) return ResponseEntity.status(403).build();
+
+        Map<String, Object> lesson;
+        try {
+            lesson = jdbc.queryForMap("""
+                SELECT l.id, l.scheduled_at, l.status, l.enrollment_id, e.student_id
+                FROM lessons l JOIN enrollments e ON e.id = l.enrollment_id
+                WHERE l.id = ? AND l.teacher_id = ?
+                """, lessonId, teacherId);
+        } catch (Exception e) {
+            return ResponseEntity.status(404).body(Map.of("message", "Урок не найден"));
+        }
+
+        String status = (String) lesson.get("status");
+        if (!"PLANNED".equals(status)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Можно отменить только запланированный урок"));
+        }
+
+        Timestamp scheduledAt = (Timestamp) lesson.get("scheduled_at");
+        long studentId = ((Number) lesson.get("student_id")).longValue();
+        String reason = (String) body.get("reason");
+
+        long hoursUntil = java.time.Duration.between(java.time.Instant.now(), scheduledAt.toInstant()).toHours();
+        boolean lateCancel = hoursUntil < CANCEL_FREE_WINDOW_HOURS;
+
+        String cancelNote = (reason != null && !reason.isBlank() ? reason : "Отменено преподавателем")
+            + (lateCancel ? " (отмена менее чем за 4 часа — урок списан)" : "");
+
+        jdbc.update(
+            "UPDATE lessons SET status='CANCELLED'::lesson_status, cancel_reason=? WHERE id=?",
+            cancelNote, lessonId);
+
+        if (lateCancel) {
+            jdbc.update("""
+                UPDATE subscriptions SET lessons_used = lessons_used + 1
+                WHERE id = (
+                    SELECT s.id FROM subscriptions s
+                    WHERE s.student_id = ? AND s.status = 'ACTIVE'
+                    ORDER BY s.created_at DESC LIMIT 1
+                )
+                """, studentId);
+        }
+
+        var odt = scheduledAt.toInstant().atZone(MOSCOW);
+        String when = odt.format(DateTimeFormatter.ofPattern("dd.MM в HH:mm"));
+        String chatText = lateCancel
+            ? "Урок " + when + " отменён. Так как отмена произошла менее чем за 4 часа до начала, урок засчитан как проведённый."
+            : "Урок " + when + " отменён без списания — отмена больше чем за 4 часа до начала.";
+
+        notifyStudent(studentId, "Урок отменён", chatText);
+        postChatMessage(teacherId, studentId, chatText);
+
+        return ResponseEntity.ok(Map.of("lateCancel", lateCancel));
+    }
+
+    /** Перенос занятия на другое (свободное у преподавателя) время. */
+    public ResponseEntity<?> rescheduleLesson(String teacherEmail, long lessonId, Map<String, Object> body) {
+        if (teacherEmail == null) return ResponseEntity.status(401).build();
+        Long teacherId = resolveTeacherId(teacherEmail);
+        if (teacherId == null) return ResponseEntity.status(403).build();
+
+        String newAtStr = (String) body.get("scheduledAt");
+        if (newAtStr == null) return ResponseEntity.badRequest().body(Map.of("message", "Не указано новое время"));
+
+        Map<String, Object> lesson;
+        try {
+            lesson = jdbc.queryForMap("""
+                SELECT l.id, l.scheduled_at, l.status, l.duration_min, l.original_date, e.student_id
+                FROM lessons l JOIN enrollments e ON e.id = l.enrollment_id
+                WHERE l.id = ? AND l.teacher_id = ?
+                """, lessonId, teacherId);
+        } catch (Exception e) {
+            return ResponseEntity.status(404).body(Map.of("message", "Урок не найден"));
+        }
+
+        if (!"PLANNED".equals(lesson.get("status"))) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Можно перенести только запланированный урок"));
+        }
+
+        ZonedDateTime newAt;
+        try {
+            newAt = parseDateTime(newAtStr);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Некорректный формат времени"));
+        }
+
+        int durationMin = ((Number) lesson.get("duration_min")).intValue();
+        Timestamp newTs = Timestamp.from(newAt.toInstant());
+
+        // проверяем, что новый слот свободен у преподавателя (нет пересечения с другими уроками)
+        Integer conflicts = jdbc.queryForObject("""
+            SELECT COUNT(*) FROM lessons
+            WHERE teacher_id = ? AND id != ? AND status = 'PLANNED'
+              AND scheduled_at < (?::timestamptz + (? || ' minutes')::interval)
+              AND (scheduled_at + (duration_min || ' minutes')::interval) > ?::timestamptz
+            """, Integer.class, teacherId, lessonId, newTs, durationMin, newTs);
+        if (conflicts != null && conflicts > 0) {
+            return ResponseEntity.badRequest().body(Map.of("message", "На это время у вас уже есть урок"));
+        }
+
+        Object originalDate = lesson.get("original_date");
+        Timestamp keepOriginal = originalDate != null ? (Timestamp) originalDate : (Timestamp) lesson.get("scheduled_at");
+
+        jdbc.update("""
+            UPDATE lessons SET scheduled_at=?, original_date=?, reschedule_count=reschedule_count+1, last_rescheduled_at=NOW()
+            WHERE id=?
+            """, newTs, keepOriginal, lessonId);
+
+        long studentId = ((Number) lesson.get("student_id")).longValue();
+        String when = newAt.format(DateTimeFormatter.ofPattern("dd.MM в HH:mm"));
+        String chatText = "Урок перенесён на " + when + ".";
+
+        notifyStudent(studentId, "Урок перенесён", chatText);
+        postChatMessage(teacherId, studentId, chatText);
+
+        return ResponseEntity.ok(Map.of("scheduledAt", newTs.toString()));
+    }
+
+    /** Список учеников урока с текущей отметкой о посещении (для ручной простановки преподавателем). */
+    public ResponseEntity<?> getLessonRoster(String teacherEmail, long lessonId) {
+        if (teacherEmail == null) return ResponseEntity.status(401).build();
+        Long teacherId = resolveTeacherId(teacherEmail);
+        if (teacherId == null) return ResponseEntity.status(403).build();
+
+        Integer owns = jdbc.queryForObject(
+            "SELECT COUNT(*) FROM lessons WHERE id=? AND teacher_id=?", Integer.class, lessonId, teacherId);
+        if (owns == null || owns == 0) return ResponseEntity.status(404).body(Map.of("message", "Урок не найден"));
+
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+            SELECT u.id, u.name, u.initials, ls.attended
+            FROM lesson_students ls JOIN users u ON u.id = ls.student_id
+            WHERE ls.lesson_id = ?
+            ORDER BY u.name
+            """, lessonId);
+
+        List<Map<String, Object>> roster = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("studentId", row.get("id"));
+            item.put("name", row.get("name"));
+            item.put("initials", row.get("initials"));
+            item.put("attended", row.get("attended"));
+            roster.add(item);
+        }
+        return ResponseEntity.ok(roster);
+    }
+
+    /** Преподаватель вручную отмечает, кто из учеников был на уроке. Перерешает статус урока сразу же. */
+    public ResponseEntity<?> markAttendance(String teacherEmail, long lessonId, Map<String, Object> body) {
+        if (teacherEmail == null) return ResponseEntity.status(401).build();
+        Long teacherId = resolveTeacherId(teacherEmail);
+        if (teacherId == null) return ResponseEntity.status(403).build();
+
+        Integer owns = jdbc.queryForObject(
+            "SELECT COUNT(*) FROM lessons WHERE id=? AND teacher_id=?", Integer.class, lessonId, teacherId);
+        if (owns == null || owns == 0) return ResponseEntity.status(404).body(Map.of("message", "Урок не найден"));
+
+        Object recordsObj = body.get("records");
+        if (!(recordsObj instanceof List<?> records)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Не указан список учеников"));
+        }
+
+        for (Object recObj : records) {
+            if (!(recObj instanceof Map<?, ?> rec)) continue;
+            long studentId = ((Number) rec.get("studentId")).longValue();
+            boolean attended = Boolean.TRUE.equals(rec.get("attended"));
+            jdbc.update(
+                "UPDATE lesson_students SET attended=? WHERE lesson_id=? AND student_id=?",
+                attended, lessonId, studentId);
+        }
+
+        resolveLessonStatus(lessonId);
+        return ResponseEntity.ok().build();
+    }
+
+    /** Подключение к уроку (заглушка под будущую систему конференций) — отмечает присутствие звонящего. */
+    public ResponseEntity<?> joinLesson(String userEmail, long lessonId) {
+        if (userEmail == null) return ResponseEntity.status(401).build();
+
+        Long userId;
+        String role;
+        try {
+            Map<String, Object> u = jdbc.queryForMap("SELECT id, role FROM users WHERE email=?", userEmail);
+            userId = ((Number) u.get("id")).longValue();
+            role = (String) u.get("role");
+        } catch (Exception e) {
+            return ResponseEntity.status(401).build();
+        }
+
+        Integer isParticipant;
+        if ("TEACHER".equals(role)) {
+            isParticipant = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM lessons WHERE id=? AND teacher_id=?", Integer.class, lessonId, userId);
+        } else {
+            isParticipant = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM lesson_students WHERE lesson_id=? AND student_id=?", Integer.class, lessonId, userId);
+            if (isParticipant != null && isParticipant > 0) {
+                jdbc.update("UPDATE lesson_students SET attended=true WHERE lesson_id=? AND student_id=?", lessonId, userId);
+            }
+        }
+        if (isParticipant == null || isParticipant == 0) {
+            return ResponseEntity.status(403).body(Map.of("message", "Вы не участник этого урока"));
+        }
+
+        jdbc.update(
+            "UPDATE lessons SET status='IN_PROGRESS'::lesson_status WHERE id=? AND status='PLANNED'::lesson_status",
+            lessonId);
+
+        return ResponseEntity.ok().build();
+    }
+
+    /** Пересчитывает статус урока по факту посещений (вызывается сразу после ручной отметки). */
+    private void resolveLessonStatus(long lessonId) {
+        Integer anyAttended = jdbc.queryForObject(
+            "SELECT COUNT(*) FROM lesson_students WHERE lesson_id=? AND attended=true", Integer.class, lessonId);
+        Integer anyMarked = jdbc.queryForObject(
+            "SELECT COUNT(*) FROM lesson_students WHERE lesson_id=? AND attended IS NOT NULL", Integer.class, lessonId);
+
+        if (anyAttended != null && anyAttended > 0) {
+            jdbc.update("UPDATE lessons SET status='DONE'::lesson_status WHERE id=? AND status != 'CANCELLED'::lesson_status", lessonId);
+        } else if (anyMarked != null && anyMarked > 0) {
+            jdbc.update("UPDATE lessons SET status='MISSED'::lesson_status WHERE id=? AND status != 'CANCELLED'::lesson_status", lessonId);
+        }
+    }
+
+    /** Находит (или создаёт) личный диалог преподавателя с учеником и пишет туда сообщение от его имени. */
+    private void postChatMessage(long teacherId, long studentId, String text) {
+        List<Long> existing = jdbc.queryForList("""
+            SELECT cm.conversation_id FROM conversation_members cm
+            WHERE cm.user_id IN (?, ?)
+            GROUP BY cm.conversation_id
+            HAVING COUNT(DISTINCT cm.user_id) = 2
+               AND COUNT(*) = (SELECT COUNT(*) FROM conversation_members x WHERE x.conversation_id = cm.conversation_id)
+            """, Long.class, teacherId, studentId);
+
+        long convId;
+        if (!existing.isEmpty()) {
+            convId = existing.get(0);
+        } else {
+            convId = jdbc.queryForObject("INSERT INTO conversations DEFAULT VALUES RETURNING id", Long.class);
+            jdbc.update("INSERT INTO conversation_members (conversation_id, user_id) VALUES (?,?),(?,?)",
+                convId, teacherId, convId, studentId);
+        }
+
+        jdbc.update(
+            "INSERT INTO messages (conversation_id, sender_id, body, is_read, is_system, sent_at) VALUES (?,?,?,false,true,NOW())",
+            convId, teacherId, crypto.encrypt(text));
     }
 }

@@ -9,5 +9,6 @@ public record TeacherStudentDto(
         String level,
         int progress,
         String status,
-        String nextLesson
+        String nextLesson,
+        Integer lessonsLeft   // уроков осталось по активному абонементу (null = нет абонемента)
 ) {}

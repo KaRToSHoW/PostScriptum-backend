@@ -6,6 +6,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import ru.postscriptum.portal.repository.UserRepository;
+import ru.postscriptum.portal.service.MessageCryptoService;
 
 import java.util.*;
 
@@ -16,6 +17,7 @@ public class MessagesController {
 
     private final JdbcTemplate jdbc;
     private final UserRepository userRepository;
+    private final MessageCryptoService crypto;
 
     @GetMapping
     public ResponseEntity<?> conversations(Authentication auth) {
@@ -45,7 +47,7 @@ public class MessagesController {
             item.put("id",       row.get("conv_id"));
             item.put("name",     row.get("name"));
             item.put("initials", row.get("initials"));
-            item.put("lastMsg",  row.get("last_msg"));
+            item.put("lastMsg",  crypto.decrypt((String) row.get("last_msg")));
             item.put("lastTs",   row.get("last_ts"));
             item.put("unread",   row.get("unread"));
             result.add(item);
@@ -59,7 +61,7 @@ public class MessagesController {
         if (auth == null) return ResponseEntity.ok(List.of());
 
         String sql = """
-            SELECT m.id, m.body, m.sent_at, m.is_read,
+            SELECT m.id, m.body, m.sent_at, m.is_read, m.is_system,
                    u.id AS sender_id, u.name AS sender_name, u.email AS sender_email
             FROM messages m JOIN users u ON u.id = m.sender_id
             WHERE m.conversation_id = ?
@@ -72,9 +74,10 @@ public class MessagesController {
         for (Map<String, Object> row : rows) {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("id",          row.get("id"));
-            item.put("body",        row.get("body"));
+            item.put("body",        crypto.decrypt((String) row.get("body")));
             item.put("sentAt",      row.get("sent_at"));
             item.put("isRead",      row.get("is_read"));
+            item.put("isSystem",    row.get("is_system"));
             item.put("senderId",    row.get("sender_id"));
             item.put("senderName",  row.get("sender_name"));
             item.put("senderEmail", row.get("sender_email"));
@@ -91,16 +94,17 @@ public class MessagesController {
         // verify membership
         Integer member = jdbc.queryForObject("SELECT COUNT(*) FROM conversation_members WHERE conversation_id=? AND user_id=?", Integer.class, convId, me);
         if (member == 0) return ResponseEntity.status(403).build();
+        String plainBody = body.get("body");
         Long id = jdbc.queryForObject(
             "INSERT INTO messages (conversation_id, sender_id, body, is_read, sent_at) VALUES (?,?,?,false,NOW()) RETURNING id",
-            Long.class, convId, me, body.get("body"));
-        // notify the other member(s)
+            Long.class, convId, me, crypto.encrypt(plainBody));
+        // notify the other member(s) — превью уведомления остаётся читаемым, само сообщение в БД зашифровано
         jdbc.update("""
             INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at)
             SELECT cm.user_id, 'NEW_MESSAGE'::notification_type, ?, ?, '/messages', false, NOW()
             FROM conversation_members cm WHERE cm.conversation_id = ? AND cm.user_id != ?
             """, (Object) (jdbc.queryForObject("SELECT name FROM users WHERE id=?", String.class, me)),
-            body.get("body"), convId, me);
+            plainBody, convId, me);
         return ResponseEntity.ok(Map.of("id", id));
     }
 

@@ -63,6 +63,41 @@ public class TeacherController {
         return teacherService.createRecurringLessons(email, body);
     }
 
+    // ── Занятия по конкретным датам (выбраны вручную в календаре) ────────────
+    @PostMapping("/api/teacher/lessons/batch")
+    public ResponseEntity<?> createBatchLessons(@RequestBody Map<String, Object> body) {
+        String email = currentEmail();
+        return teacherService.createBatchLessons(email, body);
+    }
+
+    // ── Отмена урока (правило 4 часов) ────────────────────────────────────────
+    @PostMapping("/api/teacher/lessons/{id}/cancel")
+    public ResponseEntity<?> cancelLesson(@PathVariable long id, @RequestBody(required = false) Map<String, Object> body) {
+        String email = currentEmail();
+        return teacherService.cancelLesson(email, id, body != null ? body : Map.of());
+    }
+
+    // ── Перенос урока на другое время ─────────────────────────────────────────
+    @PostMapping("/api/teacher/lessons/{id}/reschedule")
+    public ResponseEntity<?> rescheduleLesson(@PathVariable long id, @RequestBody Map<String, Object> body) {
+        String email = currentEmail();
+        return teacherService.rescheduleLesson(email, id, body);
+    }
+
+    // ── Список учеников урока с отметкой посещения ────────────────────────────
+    @GetMapping("/api/teacher/lessons/{id}/roster")
+    public ResponseEntity<?> getRoster(@PathVariable long id) {
+        String email = currentEmail();
+        return teacherService.getLessonRoster(email, id);
+    }
+
+    // ── Ручная отметка посещаемости преподавателем ────────────────────────────
+    @PostMapping("/api/teacher/lessons/{id}/attendance")
+    public ResponseEntity<?> markAttendance(@PathVariable long id, @RequestBody Map<String, Object> body) {
+        String email = currentEmail();
+        return teacherService.markAttendance(email, id, body);
+    }
+
     // ----------------------------------------------------------------
 
     private String currentEmail() {
