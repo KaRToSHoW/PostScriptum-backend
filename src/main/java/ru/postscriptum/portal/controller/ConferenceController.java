@@ -1,6 +1,7 @@
 package ru.postscriptum.portal.controller;
 
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.Authentication;
@@ -24,6 +25,28 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 public class ConferenceController {
 
     private final JdbcTemplate jdbc;
+
+    @Value("${app.turn.url:}")
+    private String turnUrl;
+    @Value("${app.turn.user:}")
+    private String turnUser;
+    @Value("${app.turn.password:}")
+    private String turnPassword;
+
+    /** ICE-конфигурация для клиентов: STUN всегда, TURN — если настроен на сервере. */
+    @GetMapping("/ice")
+    public ResponseEntity<?> ice(Authentication auth) {
+        if (auth == null) return ResponseEntity.status(401).build();
+        List<Map<String, Object>> servers = new ArrayList<>();
+        servers.add(Map.of("urls", "stun:stun.l.google.com:19302"));
+        if (turnUrl != null && !turnUrl.isBlank() && turnPassword != null && !turnPassword.isBlank()) {
+            servers.add(Map.of(
+                "urls", turnUrl,
+                "username", turnUser,
+                "credential", turnPassword));
+        }
+        return ResponseEntity.ok(Map.of("iceServers", servers));
+    }
 
     /* ── in-memory сигналинг ─────────────────────────────────────────────── */
 
