@@ -27,7 +27,7 @@ public class ManagerController {
             FROM users u
             LEFT JOIN teacher_languages tl ON tl.teacher_id = u.id
             LEFT JOIN languages         l  ON l.id = tl.language_id
-            WHERE u.role = 'TEACHER'
+            WHERE u.role = 'TEACHER' AND u.is_active = true
             GROUP BY u.id, u.name, u.initials
             ORDER BY u.name
             """);
@@ -45,14 +45,14 @@ public class ManagerController {
     public ResponseEntity<?> teacherStudents(@PathVariable Long teacherId, Authentication auth) {
         if (auth == null) return ResponseEntity.status(401).build();
         List<Map<String, Object>> rows = jdbc.queryForList("""
-            SELECT u.id, u.name, u.initials,
+            SELECT u.id, u.name, u.initials, u.email,
                    STRING_AGG(DISTINCT l.name_ru, ', ' ORDER BY l.name_ru) AS langs,
                    STRING_AGG(DISTINCT l.code,    ','  ORDER BY l.code)    AS lang_codes
             FROM enrollments e
             JOIN users    u ON u.id = e.student_id
             JOIN languages l ON l.id = e.language_id
             WHERE e.teacher_id = ? AND e.is_active = true
-            GROUP BY u.id, u.name, u.initials
+            GROUP BY u.id, u.name, u.initials, u.email
             ORDER BY u.name
             """, teacherId);
         List<Map<String, Object>> result = new ArrayList<>();
@@ -138,6 +138,10 @@ public class ManagerController {
     public ResponseEntity<?> createBatchLessons(Authentication auth, @RequestBody Map<String, Object> body) {
         if (auth == null) return ResponseEntity.status(401).build();
         Long teacherId = ((Number) body.get("teacherId")).longValue();
+        Long studentId = ((Number) body.get("studentId")).longValue();
+        String langCode = (String) body.get("languageCode");
+        try { ensureEnrollment(teacherId, studentId, langCode); }
+        catch (Exception e) { return ResponseEntity.badRequest().body(Map.of("message", e.getMessage())); }
         String teacherEmail = jdbc.queryForObject("SELECT email FROM users WHERE id=?", String.class, teacherId);
         Map<String, Object> delegated = new HashMap<>(body);
         delegated.remove("teacherId");
@@ -148,9 +152,48 @@ public class ManagerController {
     public ResponseEntity<?> createRecurringLessons(Authentication auth, @RequestBody Map<String, Object> body) {
         if (auth == null) return ResponseEntity.status(401).build();
         Long teacherId = ((Number) body.get("teacherId")).longValue();
+        Long studentId = ((Number) body.get("studentId")).longValue();
+        String langCode = (String) body.get("languageCode");
+        try { ensureEnrollment(teacherId, studentId, langCode); }
+        catch (Exception e) { return ResponseEntity.badRequest().body(Map.of("message", e.getMessage())); }
         String teacherEmail = jdbc.queryForObject("SELECT email FROM users WHERE id=?", String.class, teacherId);
         Map<String, Object> delegated = new HashMap<>(body);
         delegated.remove("teacherId");
         return teacherService.createRecurringLessons(teacherEmail, delegated);
+    }
+
+    private void ensureEnrollment(long teacherId, long studentId, String languageCode) {
+        if (languageCode == null || languageCode.isBlank()) {
+            throw new RuntimeException("Выберите язык урока");
+        }
+        // Check existing active enrollment
+        Integer count = jdbc.queryForObject("""
+            SELECT COUNT(*) FROM enrollments e
+            JOIN languages l ON l.id = e.language_id
+            WHERE e.teacher_id=? AND e.student_id=? AND l.code=? AND e.is_active=true
+            """, Integer.class, teacherId, studentId, languageCode);
+        if (count != null && count > 0) return;
+
+        // Create enrollment automatically
+        Long languageId = jdbc.queryForObject("SELECT id FROM languages WHERE code=?", Long.class, languageCode);
+        if (languageId == null) throw new RuntimeException("Язык не найден: " + languageCode);
+
+        // Re-activate if inactive enrollment already exists
+        Integer existsInactive = jdbc.queryForObject("""
+            SELECT COUNT(*) FROM enrollments e
+            JOIN languages l ON l.id = e.language_id
+            WHERE e.teacher_id=? AND e.student_id=? AND l.code=?
+            """, Integer.class, teacherId, studentId, languageCode);
+        if (existsInactive != null && existsInactive > 0) {
+            jdbc.update("""
+                UPDATE enrollments SET is_active=true
+                WHERE teacher_id=? AND student_id=? AND language_id=?
+                """, teacherId, studentId, languageId);
+        } else {
+            jdbc.update(
+                "INSERT INTO enrollments (student_id, teacher_id, language_id, start_date, lessons_done, lessons_total, is_active) " +
+                "VALUES (?, ?, ?, NOW()::date, 0, 0, true)",
+                studentId, teacherId, languageId);
+        }
     }
 }

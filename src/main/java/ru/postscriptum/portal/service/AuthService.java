@@ -57,6 +57,7 @@ public class AuthService {
     public AuthResponse me(String email) {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("Пользователь не найден"));
+        if (!user.isActive()) throw new RuntimeException("Аккаунт отключён");
         return toResponse(user);
     }
 

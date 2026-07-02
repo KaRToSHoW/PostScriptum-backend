@@ -40,7 +40,7 @@ public class SearchController {
                 FROM users u
                 LEFT JOIN enrollments e  ON e.student_id  = u.id AND e.is_active = true
                 LEFT JOIN languages   l  ON l.id = e.language_id
-                WHERE u.role = 'STUDENT' AND LOWER(u.name) LIKE ?
+                WHERE u.role = 'STUDENT' AND u.is_active = true AND LOWER(u.name) LIKE ?
                 GROUP BY u.id, u.name, u.initials, u.email
                 ORDER BY u.name
                 LIMIT 6
@@ -56,7 +56,7 @@ public class SearchController {
                 FROM users u
                 LEFT JOIN teacher_languages tl ON tl.teacher_id = u.id
                 LEFT JOIN languages         l  ON l.id = tl.language_id
-                WHERE u.role = 'TEACHER' AND LOWER(u.name) LIKE ?
+                WHERE u.role = 'TEACHER' AND u.is_active = true AND LOWER(u.name) LIKE ?
                 GROUP BY u.id, u.name, u.initials
                 ORDER BY u.name
                 LIMIT 6

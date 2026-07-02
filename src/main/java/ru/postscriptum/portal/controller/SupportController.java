@@ -29,6 +29,7 @@ public class SupportController {
 
         Long existing = findExistingConversation(me);
         if (existing != null) {
+            reassignToManagerIfNeeded(existing, me);
             return ResponseEntity.ok(Map.of("conversationId", existing));
         }
 
@@ -54,6 +55,27 @@ public class SupportController {
         return ResponseEntity.ok(Map.of("conversationId", convId));
     }
 
+    /** Если чат поддержки закреплён за админом, а активный менеджер есть — переводим на менеджера. */
+    private void reassignToManagerIfNeeded(long convId, long ownerId) {
+        Boolean hasManager = jdbc.queryForObject("""
+            SELECT EXISTS (
+                SELECT 1 FROM conversation_members cm
+                JOIN users u ON u.id = cm.user_id
+                WHERE cm.conversation_id = ? AND u.role = 'MANAGER'::user_role AND u.is_active = true
+            )
+            """, Boolean.class, convId);
+        if (Boolean.TRUE.equals(hasManager)) return;
+
+        Long managerId = pickLeastLoadedByRole("MANAGER");
+        if (managerId == null) return;
+
+        jdbc.update("""
+            DELETE FROM conversation_members
+            WHERE conversation_id = ? AND user_id != ?
+            """, convId, ownerId);
+        jdbc.update("INSERT INTO conversation_members (conversation_id, user_id) VALUES (?,?)", convId, managerId);
+    }
+
     private Long findExistingConversation(long userId) {
         try {
             return jdbc.queryForObject(
@@ -63,18 +85,24 @@ public class SupportController {
         }
     }
 
-    /** Сотрудник поддержки (MANAGER и ADMIN — один общий пул) с наименьшим числом закреплённых диалогов. */
+    /** Наименее загруженный менеджер; админы — только если активных менеджеров нет вовсе. */
     private Long pickLeastLoadedManager() {
+        Long manager = pickLeastLoadedByRole("MANAGER");
+        if (manager != null) return manager;
+        return pickLeastLoadedByRole("ADMIN");
+    }
+
+    private Long pickLeastLoadedByRole(String role) {
         List<Long> candidates = jdbc.queryForList("""
             SELECT u.id
             FROM users u
             LEFT JOIN conversation_members cm ON cm.user_id = u.id
             LEFT JOIN conversations c ON c.id = cm.conversation_id AND c.support_owner_id IS NOT NULL
-            WHERE u.role IN ('MANAGER'::user_role, 'ADMIN'::user_role) AND u.is_active = true
+            WHERE u.role = ?::user_role AND u.is_active = true
             GROUP BY u.id
             ORDER BY COUNT(c.id) ASC, u.id ASC
             LIMIT 1
-            """, Long.class);
+            """, Long.class, role);
         return candidates.isEmpty() ? null : candidates.get(0);
     }
 }

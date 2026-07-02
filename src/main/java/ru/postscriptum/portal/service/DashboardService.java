@@ -62,47 +62,81 @@ public class DashboardService {
     public Map<String, Object> getStudentDashboard(Long studentId) {
         Map<String, Object> result = new LinkedHashMap<>();
 
-        // streak
+        // streak — количество проведённых занятий подряд без пропуска
         int streak = 0;
         try {
-            Integer s = jdbc.queryForObject(
-                    "SELECT streak_days FROM student_profiles WHERE user_id = ?",
-                    Integer.class, studentId);
-            if (s != null) streak = s;
-        } catch (EmptyResultDataAccessException ignored) {}
+            List<String> statuses = jdbc.queryForList(
+                    "SELECT l.status::text FROM lessons l " +
+                    "JOIN lesson_students ls ON ls.lesson_id = l.id " +
+                    "WHERE ls.student_id = ? AND l.status IN ('DONE','MISSED') " +
+                    "ORDER BY l.scheduled_at DESC LIMIT 200",
+                    String.class, studentId);
+            for (String st : statuses) {
+                if ("DONE".equals(st)) streak++;
+                else break;
+            }
+        } catch (Exception ignored) {}
         result.put("streak", streak);
 
-        // subscription
+        // пропуски — всего пропущенных уроков
+        int missed = 0;
+        try {
+            Integer m = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM lessons l " +
+                    "JOIN lesson_students ls ON ls.lesson_id = l.id " +
+                    "WHERE ls.student_id = ? AND l.status = 'MISSED'",
+                    Integer.class, studentId);
+            if (m != null) missed = m;
+        } catch (Exception ignored) {}
+        result.put("missed", missed);
+
+        // subscription — суммируем все активные абонементы
         Map<String, Object> subscription = new LinkedHashMap<>();
         subscription.put("used", 0);
         subscription.put("total", 0);
         subscription.put("expiresAt", null);
         try {
-            List<Map<String, Object>> subs = jdbc.queryForList(
-                    "SELECT lessons_used, lessons_total, end_date " +
+            Map<String, Object> row = jdbc.queryForMap(
+                    "SELECT COALESCE(SUM(lessons_used), 0)  AS used, " +
+                    "       COALESCE(SUM(lessons_total), 0) AS total, " +
+                    "       MAX(end_date)                   AS end_date " +
                     "FROM subscriptions " +
-                    "WHERE student_id = ? AND status = 'ACTIVE' " +
-                    "ORDER BY end_date DESC LIMIT 1",
+                    "WHERE student_id = ? AND status = 'ACTIVE'",
                     studentId);
-            if (!subs.isEmpty()) {
-                Map<String, Object> row = subs.get(0);
-                subscription.put("used",      row.get("lessons_used"));
-                subscription.put("total",     row.get("lessons_total"));
-                Object endDate = row.get("end_date");
-                subscription.put("expiresAt", endDate != null ? endDate.toString() : null);
-            }
+            subscription.put("used",  ((Number) row.get("used")).intValue());
+            subscription.put("total", ((Number) row.get("total")).intValue());
+            Object endDate = row.get("end_date");
+            subscription.put("expiresAt", endDate != null ? endDate.toString() : null);
         } catch (EmptyResultDataAccessException ignored) {}
         result.put("subscription", subscription);
 
         // courses (enrollments → languages, no courses table)
         List<Map<String, Object>> courseRows = jdbc.queryForList(
-                "SELECT e.id, l.name_ru AS language, l.code AS lang, " +
+                "SELECT e.id, e.language_id, l.name_ru AS language, l.code AS lang, " +
                 "       u.name AS teacher " +
                 "FROM enrollments e " +
                 "JOIN languages l ON l.id = e.language_id " +
                 "JOIN users u ON u.id = e.teacher_id " +
                 "WHERE e.student_id = ? AND e.is_active = true",
                 studentId);
+
+        // ближайший запланированный урок по каждому языку ученика
+        Map<Long, OffsetDateTime> nextByLang = new HashMap<>();
+        try {
+            List<Map<String, Object>> nextRows = jdbc.queryForList(
+                    "SELECT l.language_id, MIN(l.scheduled_at) AS next_at " +
+                    "FROM lessons l " +
+                    "JOIN lesson_students ls ON ls.lesson_id = l.id " +
+                    "WHERE ls.student_id = ? AND l.status = 'PLANNED' AND l.scheduled_at > NOW() " +
+                    "GROUP BY l.language_id",
+                    studentId);
+            for (Map<String, Object> row : nextRows) {
+                OffsetDateTime dt = toMsk(row.get("next_at"));
+                if (dt != null) nextByLang.put(((Number) row.get("language_id")).longValue(), dt);
+            }
+        } catch (Exception ignored) {}
+
+        String[] MONTH_GEN = {"янв","фев","мар","апр","мая","июн","июл","авг","сен","окт","ноя","дек"};
 
         List<Map<String, Object>> courses = new ArrayList<>();
         for (Map<String, Object> row : courseRows) {
@@ -111,14 +145,17 @@ public class DashboardService {
             course.put("language", row.get("language"));
             course.put("lang",     row.get("lang"));
             course.put("teacher",  row.get("teacher"));
-            course.put("nextDate", null);
+            OffsetDateTime next = nextByLang.get(((Number) row.get("language_id")).longValue());
+            course.put("nextDate", next != null
+                    ? next.getDayOfMonth() + " " + MONTH_GEN[next.getMonthValue() - 1] + ", " + next.format(HH_MM)
+                    : null);
             courses.add(course);
         }
         result.put("courses", courses);
 
         // schedule (upcoming planned lessons for student)
         List<Map<String, Object>> scheduleRows = jdbc.queryForList(
-                "SELECT ls2.scheduled_at, ls2.duration_min, ls2.zoom_url, " +
+                "SELECT ls2.id, ls2.scheduled_at, ls2.duration_min, ls2.zoom_url, " +
                 "       u.name AS teacher, lang.name_ru AS language, lang.code AS lang " +
                 "FROM lesson_students ls " +
                 "JOIN lessons ls2 ON ls2.id = ls.lesson_id " +
@@ -156,6 +193,7 @@ public class DashboardService {
         if (!schedule.isEmpty()) {
             Map<String, Object> first = schedule.get(0);
             Map<String, Object> next = new LinkedHashMap<>();
+            next.put("id",       scheduleRows.get(0).get("id"));
             next.put("date",     first.get("date"));
             next.put("dayLabel", first.get("dayLabel"));
             next.put("time",     first.get("timeFrom"));
@@ -171,10 +209,11 @@ public class DashboardService {
         // homework
         List<Map<String, Object>> hwRows = jdbc.queryForList(
                 "SELECT h.id, h.title, h.due_at, h.status, " +
-                "       lang.code AS lang " +
+                "       COALESCE(llang.code, hlang.code) AS lang " +
                 "FROM homework h " +
                 "LEFT JOIN lessons l ON l.id = h.lesson_id " +
-                "LEFT JOIN languages lang ON lang.id = l.language_id " +
+                "LEFT JOIN languages llang ON llang.id = l.language_id " +
+                "LEFT JOIN languages hlang ON hlang.id = h.language_id " +
                 "WHERE h.student_id = ? " +
                 "ORDER BY h.due_at ASC " +
                 "LIMIT 5",
