@@ -138,9 +138,10 @@ public class ManagerController {
     public ResponseEntity<?> createBatchLessons(Authentication auth, @RequestBody Map<String, Object> body) {
         if (auth == null) return ResponseEntity.status(401).build();
         Long teacherId = ((Number) body.get("teacherId")).longValue();
-        Long studentId = ((Number) body.get("studentId")).longValue();
         String langCode = (String) body.get("languageCode");
-        try { ensureEnrollment(teacherId, studentId, langCode); }
+        try {
+            for (long studentId : bodyStudentIds(body)) ensureEnrollment(teacherId, studentId, langCode);
+        }
         catch (Exception e) { return ResponseEntity.badRequest().body(Map.of("message", e.getMessage())); }
         String teacherEmail = jdbc.queryForObject("SELECT email FROM users WHERE id=?", String.class, teacherId);
         Map<String, Object> delegated = new HashMap<>(body);
@@ -152,14 +153,26 @@ public class ManagerController {
     public ResponseEntity<?> createRecurringLessons(Authentication auth, @RequestBody Map<String, Object> body) {
         if (auth == null) return ResponseEntity.status(401).build();
         Long teacherId = ((Number) body.get("teacherId")).longValue();
-        Long studentId = ((Number) body.get("studentId")).longValue();
         String langCode = (String) body.get("languageCode");
-        try { ensureEnrollment(teacherId, studentId, langCode); }
+        try {
+            for (long studentId : bodyStudentIds(body)) ensureEnrollment(teacherId, studentId, langCode);
+        }
         catch (Exception e) { return ResponseEntity.badRequest().body(Map.of("message", e.getMessage())); }
         String teacherEmail = jdbc.queryForObject("SELECT email FROM users WHERE id=?", String.class, teacherId);
         Map<String, Object> delegated = new HashMap<>(body);
         delegated.remove("teacherId");
         return teacherService.createRecurringLessons(teacherEmail, delegated);
+    }
+
+    /** studentIds (массив) или studentId (одиночный) из тела запроса. */
+    private List<Long> bodyStudentIds(Map<String, Object> body) {
+        List<Long> result = new ArrayList<>();
+        if (body.get("studentIds") instanceof List<?> ids) {
+            for (Object o : ids) if (o instanceof Number n) result.add(n.longValue());
+        }
+        if (result.isEmpty() && body.get("studentId") instanceof Number n) result.add(n.longValue());
+        if (result.isEmpty()) throw new RuntimeException("Выберите хотя бы одного ученика");
+        return result;
     }
 
     private void ensureEnrollment(long teacherId, long studentId, String languageCode) {

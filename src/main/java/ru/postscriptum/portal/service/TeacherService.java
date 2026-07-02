@@ -19,9 +19,11 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Service
 @RequiredArgsConstructor
@@ -372,21 +374,20 @@ public class TeacherService {
         Long teacherId = resolveTeacherId(teacherEmail);
         if (teacherId == null) return ResponseEntity.status(403).build();
 
-        Object studentIdObj = body.get("studentId");
+        List<Long> studentIds = extractStudentIds(body);
         Object dayOfWeekObj = body.get("dayOfWeek");   // 1=ПН ... 7=ВС
         String time = (String) body.get("time");        // "HH:mm"
-        if (studentIdObj == null || dayOfWeekObj == null || time == null) {
+        if (studentIds.isEmpty() || dayOfWeekObj == null || time == null) {
             return ResponseEntity.badRequest().body(Map.of("message", "Не указан ученик, день недели или время"));
         }
-        long studentId = ((Number) studentIdObj).longValue();
         int dayOfWeek = ((Number) dayOfWeekObj).intValue();
         int durationMin = body.get("durationMin") != null ? ((Number) body.get("durationMin")).intValue() : 60;
         int weeksCount = body.get("weeksCount") != null ? ((Number) body.get("weeksCount")).intValue() : 8;
         String languageCode = (String) body.get("languageCode");
 
-        Map<String, Object> enrollment = resolveEnrollment(teacherId, studentId, languageCode);
-        if (enrollment == null) {
-            return ResponseEntity.badRequest().body(Map.of("message", "У этого ученика нет активного курса с вами"));
+        List<Map<String, Object>> enrollments = resolveEnrollments(teacherId, studentIds, languageCode);
+        if (enrollments == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "У кого-то из учеников нет активного курса с вами"));
         }
 
         LocalTime lt = LocalTime.parse(time);
@@ -404,7 +405,7 @@ public class TeacherService {
                 skipped.add(scheduledAt.format(DateTimeFormatter.ofPattern("dd.MM")));
                 continue;
             }
-            createdIds.add(insertLesson(teacherId, enrollment, scheduledAt, durationMin));
+            createdIds.add(insertLesson(teacherId, enrollments, scheduledAt, durationMin));
         }
 
         if (createdIds.isEmpty()) {
@@ -412,8 +413,10 @@ public class TeacherService {
         }
 
         String[] DAYS_RU = {"", "понедельникам", "вторникам", "средам", "четвергам", "пятницам", "субботам", "воскресеньям"};
-        notifyStudent(studentId, "Назначены регулярные занятия",
-            "Каждую неделю по " + DAYS_RU[dayOfWeek] + " в " + time + " — на " + weeksCount + " недель вперёд");
+        for (long studentId : studentIds) {
+            notifyStudent(studentId, "Назначены регулярные занятия",
+                "Каждую неделю по " + DAYS_RU[dayOfWeek] + " в " + time + " — на " + weeksCount + " недель вперёд");
+        }
 
         return ResponseEntity.ok(Map.of("createdCount", createdIds.size(), "ids", createdIds, "skipped", skipped));
     }
@@ -424,20 +427,19 @@ public class TeacherService {
         Long teacherId = resolveTeacherId(teacherEmail);
         if (teacherId == null) return ResponseEntity.status(403).build();
 
-        Object studentIdObj = body.get("studentId");
+        List<Long> studentIds = extractStudentIds(body);
         @SuppressWarnings("unchecked")
         List<String> dates = (List<String>) body.get("dates");  // ["YYYY-MM-DD", ...]
         String time = (String) body.get("time");
-        if (studentIdObj == null || dates == null || dates.isEmpty() || time == null) {
+        if (studentIds.isEmpty() || dates == null || dates.isEmpty() || time == null) {
             return ResponseEntity.badRequest().body(Map.of("message", "Не указан ученик, даты или время"));
         }
-        long studentId = ((Number) studentIdObj).longValue();
         int durationMin = body.get("durationMin") != null ? ((Number) body.get("durationMin")).intValue() : 60;
         String languageCode = (String) body.get("languageCode");
 
-        Map<String, Object> enrollment = resolveEnrollment(teacherId, studentId, languageCode);
-        if (enrollment == null) {
-            return ResponseEntity.badRequest().body(Map.of("message", "У этого ученика нет активного курса с вами"));
+        List<Map<String, Object>> enrollments = resolveEnrollments(teacherId, studentIds, languageCode);
+        if (enrollments == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "У кого-то из учеников нет активного курса с вами"));
         }
 
         LocalTime lt = LocalTime.parse(time);
@@ -457,16 +459,44 @@ public class TeacherService {
                 skipped.add(date.format(DateTimeFormatter.ofPattern("dd.MM")));
                 continue;
             }
-            createdIds.add(insertLesson(teacherId, enrollment, scheduledAt, durationMin));
+            createdIds.add(insertLesson(teacherId, enrollments, scheduledAt, durationMin));
         }
 
         if (createdIds.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of("message", "На все выбранные даты у вас уже есть уроки"));
         }
 
-        notifyStudent(studentId, "Назначены занятия",
-            "Назначено " + createdIds.size() + " занятий по выбранным датам");
+        for (long studentId : studentIds) {
+            notifyStudent(studentId, "Назначены занятия",
+                "Назначено " + createdIds.size() + " занятий по выбранным датам");
+        }
         return ResponseEntity.ok(Map.of("createdCount", createdIds.size(), "ids", createdIds, "skipped", skipped));
+    }
+
+    /** Достаёт список учеников из тела запроса: studentIds (массив) или studentId (одиночный). */
+    private List<Long> extractStudentIds(Map<String, Object> body) {
+        List<Long> result = new ArrayList<>();
+        Object idsObj = body.get("studentIds");
+        if (idsObj instanceof List<?> ids) {
+            for (Object o : ids) {
+                if (o instanceof Number n) result.add(n.longValue());
+            }
+        }
+        if (result.isEmpty() && body.get("studentId") instanceof Number n) {
+            result.add(n.longValue());
+        }
+        return result;
+    }
+
+    /** Активные записи всех учеников к преподавателю. null — если хотя бы у одного записи нет. */
+    private List<Map<String, Object>> resolveEnrollments(long teacherId, List<Long> studentIds, String languageCode) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (long studentId : studentIds) {
+            Map<String, Object> e = resolveEnrollment(teacherId, studentId, languageCode);
+            if (e == null) return null;
+            result.add(e);
+        }
+        return result;
     }
 
     private Long resolveTeacherId(String teacherEmail) {
@@ -506,21 +536,33 @@ public class TeacherService {
     }
 
     private long insertLesson(long teacherId, Map<String, Object> enrollment, ZonedDateTime scheduledAt, int durationMin) {
-        long enrollmentId = ((Number) enrollment.get("enrollment_id")).longValue();
-        int languageId = ((Number) enrollment.get("language_id")).intValue();
+        return insertLesson(teacherId, List.of(enrollment), scheduledAt, durationMin);
+    }
+
+    /** Один урок на всех перечисленных учеников: 1 ученик — INDIVIDUAL, больше — GROUP. */
+    private long insertLesson(long teacherId, List<Map<String, Object>> enrollments, ZonedDateTime scheduledAt, int durationMin) {
+        Map<String, Object> first = enrollments.get(0);
+        long enrollmentId = ((Number) first.get("enrollment_id")).longValue();
+        int languageId = ((Number) first.get("language_id")).intValue();
+        String format = enrollments.size() > 1 ? "GROUP" : "INDIVIDUAL";
 
         Long lessonId = jdbc.queryForObject("""
             INSERT INTO lessons (enrollment_id, teacher_id, language_id, format, scheduled_at, duration_min, status, created_at)
-            VALUES (?, ?, ?, 'INDIVIDUAL'::lesson_format, ?, ?, 'PLANNED'::lesson_status, NOW())
+            VALUES (?, ?, ?, ?::lesson_format, ?, ?, 'PLANNED'::lesson_status, NOW())
             RETURNING id
-            """, Long.class, enrollmentId, teacherId, languageId, Timestamp.from(scheduledAt.toInstant()), durationMin);
+            """, Long.class, enrollmentId, teacherId, languageId, format, Timestamp.from(scheduledAt.toInstant()), durationMin);
 
-        long studentIdForLesson = jdbc.queryForObject(
-            "SELECT student_id FROM enrollments WHERE id = ?", Long.class, enrollmentId);
-
-        jdbc.update(
-            "INSERT INTO lesson_students (lesson_id, student_id) VALUES (?, ?)",
-            lessonId, studentIdForLesson);
+        Set<Long> added = new HashSet<>();
+        for (Map<String, Object> e : enrollments) {
+            long eid = ((Number) e.get("enrollment_id")).longValue();
+            long studentId = jdbc.queryForObject(
+                "SELECT student_id FROM enrollments WHERE id = ?", Long.class, eid);
+            if (added.add(studentId)) {
+                jdbc.update(
+                    "INSERT INTO lesson_students (lesson_id, student_id) VALUES (?, ?)",
+                    lessonId, studentId);
+            }
+        }
 
         return lessonId;
     }
