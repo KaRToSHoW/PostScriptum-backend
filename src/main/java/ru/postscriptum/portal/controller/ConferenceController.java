@@ -190,6 +190,19 @@ public class ConferenceController {
             return ResponseEntity.status(403).body(Map.of("message", "Вы не участник этого урока"));
         }
 
+        // комната открывается за 10 минут до начала урока
+        try {
+            Map<String, Object> l = jdbc.queryForMap(
+                "SELECT scheduled_at, status::text AS status FROM lessons WHERE id=?", lessonId);
+            if ("PLANNED".equals(l.get("status"))) {
+                java.sql.Timestamp at = (java.sql.Timestamp) l.get("scheduled_at");
+                if (at != null && at.toInstant().isAfter(java.time.Instant.now().plusSeconds(10 * 60))) {
+                    return ResponseEntity.status(403).body(
+                        Map.of("message", "Конференция откроется за 10 минут до начала урока"));
+                }
+            }
+        } catch (Exception ignored) {}
+
         if ("STUDENT".equals(role)) {
             jdbc.update("UPDATE lesson_students SET attended=true WHERE lesson_id=? AND student_id=?", lessonId, userId);
         }

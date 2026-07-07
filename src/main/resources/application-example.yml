@@ -21,6 +21,16 @@ app:
   jwt:
     secret: REPLACE_WITH_YOUR_SECRET_MIN_32_CHARS
     expiration-ms: 86400000   # 24 часа
+  oauth:
+    frontend-url: http://localhost:5173
+    vk:
+      client-id:     REPLACE_VK_APP_ID
+      client-secret: REPLACE_VK_SECURE_KEY
+      redirect-uri:  http://localhost:8080/api/auth/oauth/vk/callback
+    yandex:
+      client-id:     REPLACE_YANDEX_CLIENT_ID
+      client-secret: REPLACE_YANDEX_CLIENT_SECRET
+      redirect-uri:  http://localhost:8080/api/auth/oauth/yandex/callback
 
 cors:
   allowed-origins: http://localhost:5173

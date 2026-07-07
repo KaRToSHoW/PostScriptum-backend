@@ -162,8 +162,8 @@ public class DashboardService {
                 "JOIN users u ON u.id = ls2.teacher_id " +
                 "JOIN languages lang ON lang.id = ls2.language_id " +
                 "WHERE ls.student_id = ? " +
-                "  AND ls2.status = 'PLANNED' " +
-                "  AND ls2.scheduled_at > NOW() " +
+                "  AND ls2.status IN ('PLANNED','IN_PROGRESS') " +
+                "  AND (ls2.scheduled_at + (COALESCE(ls2.duration_min, 60) || ' minutes')::interval) > NOW() " +
                 "ORDER BY ls2.scheduled_at ASC " +
                 "LIMIT 5",
                 studentId);
@@ -194,6 +194,10 @@ public class DashboardService {
             Map<String, Object> first = schedule.get(0);
             Map<String, Object> next = new LinkedHashMap<>();
             next.put("id",       scheduleRows.get(0).get("id"));
+            Object rawAt = scheduleRows.get(0).get("scheduled_at");
+            next.put("startAt",  rawAt instanceof Timestamp ts ? ts.toInstant().toEpochMilli() : null);
+            next.put("durMin",   scheduleRows.get(0).get("duration_min") != null
+                    ? ((Number) scheduleRows.get(0).get("duration_min")).intValue() : 60);
             next.put("date",     first.get("date"));
             next.put("dayLabel", first.get("dayLabel"));
             next.put("time",     first.get("timeFrom"));
@@ -242,15 +246,15 @@ public class DashboardService {
 
         // schedule — upcoming planned lessons for this teacher (next 7 days)
         List<Map<String, Object>> scheduleRows = jdbc.queryForList(
-                "SELECT l.scheduled_at, l.duration_min, l.status, " +
+                "SELECT l.id, l.scheduled_at, l.duration_min, l.status, " +
                 "       u.name AS student, u.initials AS student_initials, lang.code AS lang " +
                 "FROM lessons l " +
                 "JOIN lesson_students ls ON ls.lesson_id = l.id " +
                 "JOIN users u ON u.id = ls.student_id " +
                 "JOIN languages lang ON lang.id = l.language_id " +
                 "WHERE l.teacher_id = ? " +
-                "  AND l.status = 'PLANNED' " +
-                "  AND l.scheduled_at > NOW() " +
+                "  AND l.status IN ('PLANNED','IN_PROGRESS') " +
+                "  AND (l.scheduled_at + (COALESCE(l.duration_min, 60) || ' minutes')::interval) > NOW() " +
                 "  AND l.scheduled_at < NOW() + INTERVAL '7 days' " +
                 "ORDER BY l.scheduled_at ASC",
                 teacherId);
@@ -270,6 +274,10 @@ public class DashboardService {
             String monthShort = MONTH_SHORT[dt.getMonthValue() - 1];
 
             Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id",       row.get("id"));
+            Object rawTs = row.get("scheduled_at");
+            item.put("startAt",  rawTs instanceof Timestamp ts ? ts.toInstant().toEpochMilli() : null);
+            item.put("durMin",   dur);
             item.put("dateKey",  dt.format(DATE_KEY));
             item.put("date",     String.valueOf(dt.getDayOfMonth()));
             item.put("month",    monthShort);

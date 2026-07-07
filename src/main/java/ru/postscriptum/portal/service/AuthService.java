@@ -54,6 +54,37 @@ public class AuthService {
         return toResponse(user);
     }
 
+    /**
+     * Вход/регистрация через соцсеть (VK, Яндекс). Ищем пользователя по email;
+     * если его нет — создаём как ученика со случайным паролем (вход только через соцсеть).
+     */
+    public AuthResponse oauthLogin(String email, String name) {
+        User user = userRepository.findByEmail(email).orElseGet(() -> {
+            String initials = Arrays.stream(name.split("\\s+"))
+                    .filter(s -> !s.isEmpty())
+                    .map(s -> String.valueOf(s.charAt(0)).toUpperCase())
+                    .limit(2)
+                    .collect(Collectors.joining());
+
+            return userRepository.save(User.builder()
+                    .name(name)
+                    .email(email)
+                    // случайный пароль — обычный вход по паролю для таких аккаунтов недоступен
+                    .password(passwordEncoder.encode(java.util.UUID.randomUUID().toString()))
+                    .role(UserRole.STUDENT)
+                    .initials(initials)
+                    .timezone("Europe/Moscow")
+                    .locale("ru")
+                    .active(true)
+                    .build());
+        });
+
+        if (!user.isActive()) {
+            throw new DisabledException("Аккаунт отключён");
+        }
+        return toResponse(user);
+    }
+
     public AuthResponse me(String email) {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("Пользователь не найден"));

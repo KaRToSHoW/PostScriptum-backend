@@ -455,6 +455,11 @@ public class TeacherService {
                 continue;
             }
             ZonedDateTime scheduledAt = date.atTime(lt).atZone(MOSCOW);
+            // нельзя создать урок в прошлом (в т.ч. на прошедшее время сегодня)
+            if (scheduledAt.toInstant().isBefore(java.time.Instant.now())) {
+                skipped.add(date.format(DateTimeFormatter.ofPattern("dd.MM")) + " (время прошло)");
+                continue;
+            }
             if (hasConflict(teacherId, scheduledAt, durationMin, null)) {
                 skipped.add(date.format(DateTimeFormatter.ofPattern("dd.MM")));
                 continue;

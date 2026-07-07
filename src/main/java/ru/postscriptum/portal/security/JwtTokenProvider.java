@@ -44,6 +44,31 @@ public class JwtTokenProvider {
         return parseClaims(token).getSubject();
     }
 
+    /**
+     * Короткоживущий подписанный state-токен для OAuth (защита от CSRF).
+     * Не требует хранения сессии — вся защита в подписи и сроке жизни.
+     */
+    public String generateStateToken(String provider) {
+        return Jwts.builder()
+                .subject("oauth-state")
+                .claim("provider", provider)
+                .issuedAt(new Date())
+                .expiration(new Date(System.currentTimeMillis() + 600_000)) // 10 минут
+                .signWith(key)
+                .compact();
+    }
+
+    /** Проверяет подпись/срок state-токена и что он выпущен для того же провайдера. */
+    public boolean validateStateToken(String token, String provider) {
+        try {
+            Claims claims = parseClaims(token);
+            return "oauth-state".equals(claims.getSubject())
+                    && provider.equals(claims.get("provider", String.class));
+        } catch (JwtException | IllegalArgumentException e) {
+            return false;
+        }
+    }
+
     public boolean validateToken(String token) {
         try {
             parseClaims(token);
