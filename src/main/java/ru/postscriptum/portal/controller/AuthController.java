@@ -48,4 +48,26 @@ public class AuthController {
     public ResponseEntity<AuthResponse> me(@AuthenticationPrincipal UserDetails user) {
         return ResponseEntity.ok(authService.me(user.getUsername()));
     }
+
+    /** Сброс пароля по email: { email, newPassword } → новый пароль + вход. */
+    @PostMapping("/reset-password")
+    public ResponseEntity<?> resetPassword(@RequestBody Map<String, String> body) {
+        String email       = body.get("email");
+        String newPassword = body.get("newPassword");
+        if (email == null || email.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Укажите email"));
+        }
+        if (newPassword == null || newPassword.length() < 6) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Пароль минимум 6 символов"));
+        }
+        try {
+            return ResponseEntity.ok(authService.resetPassword(email.trim(), newPassword));
+        } catch (DisabledException e) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(Map.of("message", "Аккаунт отключён. Обратитесь к администратору."));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("message", e.getMessage()));
+        }
+    }
 }

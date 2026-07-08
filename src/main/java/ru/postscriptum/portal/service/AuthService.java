@@ -111,6 +111,19 @@ public class AuthService {
         return toResponse(user);
     }
 
+    /**
+     * Сброс пароля по email. После смены сразу возвращаем токен — пользователь
+     * входит без повторного ввода. (Без email-подтверждения: упрощённый вариант.)
+     */
+    public AuthResponse resetPassword(String email, String newPassword) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new IllegalArgumentException("Пользователь с таким email не найден"));
+        if (!user.isActive()) throw new DisabledException("Аккаунт отключён");
+        user.setPassword(passwordEncoder.encode(newPassword));
+        userRepository.save(user);
+        return toResponse(user);
+    }
+
     private AuthResponse toResponse(User user) {
         String subtitle = switch (user.getRole()) {
             case STUDENT  -> "Ученик";
