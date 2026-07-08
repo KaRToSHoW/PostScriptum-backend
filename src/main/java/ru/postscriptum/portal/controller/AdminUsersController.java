@@ -29,7 +29,7 @@ public class AdminUsersController {
         if (auth == null) return ResponseEntity.status(401).build();
 
         List<Map<String, Object>> result = jdbc.query(
-            "SELECT u.id, u.name, u.email, u.initials, u.role, u.phone, u.is_active, " +
+            "SELECT u.id, u.name, u.email, u.initials, u.role, u.phone, u.is_active, u.avatar_url, " +
             "       sp.parent_id, p.name AS parent_name, " +
             "       (SELECT COUNT(*) FROM enrollments e WHERE e.student_id = u.id) AS enrollments " +
             "FROM users u " +
@@ -44,6 +44,7 @@ public class AdminUsersController {
                 row.put("initials",    rs.getString("initials"));
                 row.put("role",        rs.getString("role"));
                 row.put("phone",       rs.getString("phone"));
+                row.put("avatarUrl",   rs.getString("avatar_url"));
                 row.put("active",      rs.getBoolean("is_active"));
                 long parentId = rs.getLong("parent_id");
                 row.put("parentId",    rs.wasNull() ? null : parentId);

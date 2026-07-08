@@ -123,7 +123,7 @@ public class HomeworkController {
 
         String sql = """
             SELECT h.id, h.title, h.description, h.status, h.due_at, h.attachment_url,
-                   s.id AS student_id, s.name AS student, s.initials AS student_initials,
+                   s.id AS student_id, s.name AS student, s.initials AS student_initials, s.avatar_url AS student_avatar,
                    COALESCE(llang.code, hlang.code, 'fr') AS lang,
                    hs.text_content, hs.file_url, hs.submitted_at, hs.grade, hs.feedback
             FROM homework h
@@ -165,6 +165,7 @@ public class HomeworkController {
             item.put("studentId",       row.get("student_id"));
             item.put("student",         row.get("student"));
             item.put("studentInitials", row.get("student_initials"));
+            item.put("studentAvatar",   row.get("student_avatar"));
             item.put("lang",            row.get("lang"));
             item.put("text",            row.get("text_content"));
             item.put("fileUrl",         row.get("file_url"));

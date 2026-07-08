@@ -35,7 +35,7 @@ public class TeacherService {
 
     public List<TeacherDto> listTeachers(String currentUserEmail) {
         String sql = """
-            SELECT u.id, u.name, u.initials, u.email,
+            SELECT u.id, u.name, u.initials, u.email, u.avatar_url,
                    tp.bio, tp.is_native, tp.rating, tp.workload_chip,
                    STRING_AGG(DISTINCT l.code, ',') AS lang_codes,
                    STRING_AGG(DISTINCT l.name_ru || ' ' || lv.code, ',') AS lang_names,
@@ -46,7 +46,7 @@ public class TeacherService {
             LEFT JOIN languages l ON l.id = tl.language_id
             LEFT JOIN levels lv ON lv.id = tl.level_id
             WHERE u.role = 'TEACHER' AND u.is_active = true
-            GROUP BY u.id, u.name, u.initials, u.email, tp.bio, tp.is_native, tp.rating, tp.workload_chip
+            GROUP BY u.id, u.name, u.initials, u.email, u.avatar_url, tp.bio, tp.is_native, tp.rating, tp.workload_chip
             """;
 
         List<Map<String, Object>> rows = jdbc.queryForList(sql);
@@ -128,7 +128,8 @@ public class TeacherService {
                 subtitle,
                 flag, isNative, langs, langCodes, rating, 0, students,
                 null, bio, next, List.of(), myTeacher,
-                (String) row.get("email")
+                (String) row.get("email"),
+                (String) row.get("avatar_url")
             ));
         }
         return result;
@@ -152,7 +153,7 @@ public class TeacherService {
         }
 
         String sql = """
-            SELECT e.student_id, u.name, u.initials, u.email,
+            SELECT e.student_id, u.name, u.initials, u.email, u.avatar_url,
                    STRING_AGG(lang.name_ru, ',' ORDER BY lang.name_ru) AS languages,
                    STRING_AGG(lang.code, ',' ORDER BY lang.name_ru) AS lang_codes,
                    bool_or(e.is_active) AS is_active
@@ -160,7 +161,7 @@ public class TeacherService {
             JOIN users u ON u.id = e.student_id
             JOIN languages lang ON lang.id = e.language_id
             WHERE e.teacher_id = ?
-            GROUP BY e.student_id, u.name, u.initials, u.email
+            GROUP BY e.student_id, u.name, u.initials, u.email, u.avatar_url
             ORDER BY u.name
             """;
 
@@ -206,7 +207,8 @@ public class TeacherService {
                 splitOrEmpty((String) row.get("lang_codes")),
                 isActive ? "ACTIVE" : "COMPLETED",
                 nextLesson,
-                lessonsLeft
+                lessonsLeft,
+                (String) row.get("avatar_url")
             ));
         }
         return result;
@@ -722,7 +724,7 @@ public class TeacherService {
         if (owns == null || owns == 0) return ResponseEntity.status(404).body(Map.of("message", "Урок не найден"));
 
         List<Map<String, Object>> rows = jdbc.queryForList("""
-            SELECT u.id, u.name, u.initials, ls.attended
+            SELECT u.id, u.name, u.initials, u.avatar_url, ls.attended
             FROM lesson_students ls JOIN users u ON u.id = ls.student_id
             WHERE ls.lesson_id = ?
             ORDER BY u.name
@@ -734,6 +736,7 @@ public class TeacherService {
             item.put("studentId", row.get("id"));
             item.put("name", row.get("name"));
             item.put("initials", row.get("initials"));
+            item.put("avatarUrl", row.get("avatar_url"));
             item.put("attended", row.get("attended"));
             roster.add(item);
         }

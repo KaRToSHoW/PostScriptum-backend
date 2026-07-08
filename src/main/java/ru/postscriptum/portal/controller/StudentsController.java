@@ -22,7 +22,7 @@ public class StudentsController {
         if (auth == null) return ResponseEntity.ok(List.of());
 
         List<Map<String, Object>> result = jdbc.query(
-            "SELECT u.id, u.name, u.initials, u.email, u.phone, " +
+            "SELECT u.id, u.name, u.initials, u.email, u.phone, u.avatar_url, " +
             "       p.name AS parent_name, " +
             "       (SELECT COUNT(*) FROM enrollments e WHERE e.student_id = u.id AND e.is_active) AS courses, " +
             "       (SELECT STRING_AGG(DISTINCT t.name, ', ') " +
@@ -46,6 +46,7 @@ public class StudentsController {
                 row.put("initials", rs.getString("initials"));
                 row.put("email", rs.getString("email"));
                 row.put("phone", rs.getString("phone"));
+                row.put("avatarUrl", rs.getString("avatar_url"));
                 row.put("parentName", rs.getString("parent_name"));
                 row.put("courses", rs.getLong("courses"));
                 row.put("teachers", rs.getString("teachers"));

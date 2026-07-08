@@ -145,7 +145,8 @@ public class ConferenceController {
             lesson = jdbc.queryForMap("""
                 SELECT l.id, l.scheduled_at, l.duration_min, l.status::text AS status,
                        lang.name_ru AS language, lang.code AS lang,
-                       t.id AS teacher_id, t.name AS teacher, t.initials AS teacher_initials
+                       t.id AS teacher_id, t.name AS teacher, t.initials AS teacher_initials,
+                       t.avatar_url AS teacher_avatar
                 FROM lessons l
                 JOIN languages lang ON lang.id = l.language_id
                 JOIN users t ON t.id = l.teacher_id
@@ -156,7 +157,7 @@ public class ConferenceController {
         }
 
         List<Map<String, Object>> students = jdbc.queryForList("""
-            SELECT u.id, u.name, u.initials, ls.attended
+            SELECT u.id, u.name, u.initials, u.avatar_url AS "avatarUrl", ls.attended
             FROM lesson_students ls JOIN users u ON u.id = ls.student_id
             WHERE ls.lesson_id = ? ORDER BY u.name
             """, lessonId);

@@ -11,5 +11,6 @@ public record TeacherStudentDto(
         List<String> langCodes,   // ["fr", "en"]
         String status,
         String nextLesson,
-        Integer lessonsLeft
+        Integer lessonsLeft,
+        String avatarUrl
 ) {}

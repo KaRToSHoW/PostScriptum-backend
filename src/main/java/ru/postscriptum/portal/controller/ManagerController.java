@@ -21,14 +21,14 @@ public class ManagerController {
     public ResponseEntity<?> teachers(Authentication auth) {
         if (auth == null) return ResponseEntity.status(401).build();
         List<Map<String, Object>> rows = jdbc.queryForList("""
-            SELECT u.id, u.name, u.initials,
+            SELECT u.id, u.name, u.initials, u.avatar_url AS "avatarUrl",
                    STRING_AGG(DISTINCT l.name_ru, ', ' ORDER BY l.name_ru) AS langs,
                    STRING_AGG(DISTINCT l.code,    ','  ORDER BY l.code)    AS lang_codes
             FROM users u
             LEFT JOIN teacher_languages tl ON tl.teacher_id = u.id
             LEFT JOIN languages         l  ON l.id = tl.language_id
             WHERE u.role = 'TEACHER' AND u.is_active = true
-            GROUP BY u.id, u.name, u.initials
+            GROUP BY u.id, u.name, u.initials, u.avatar_url
             ORDER BY u.name
             """);
         List<Map<String, Object>> result = new ArrayList<>();
@@ -45,14 +45,14 @@ public class ManagerController {
     public ResponseEntity<?> teacherStudents(@PathVariable Long teacherId, Authentication auth) {
         if (auth == null) return ResponseEntity.status(401).build();
         List<Map<String, Object>> rows = jdbc.queryForList("""
-            SELECT u.id, u.name, u.initials, u.email,
+            SELECT u.id, u.name, u.initials, u.email, u.avatar_url AS "avatarUrl",
                    STRING_AGG(DISTINCT l.name_ru, ', ' ORDER BY l.name_ru) AS langs,
                    STRING_AGG(DISTINCT l.code,    ','  ORDER BY l.code)    AS lang_codes
             FROM enrollments e
             JOIN users    u ON u.id = e.student_id
             JOIN languages l ON l.id = e.language_id
             WHERE e.teacher_id = ? AND e.is_active = true
-            GROUP BY u.id, u.name, u.initials, u.email
+            GROUP BY u.id, u.name, u.initials, u.email, u.avatar_url
             ORDER BY u.name
             """, teacherId);
         List<Map<String, Object>> result = new ArrayList<>();

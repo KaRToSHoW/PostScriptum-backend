@@ -26,7 +26,7 @@ public class MessagesController {
         String email = auth.getName();
 
         String sql = """
-            SELECT c.id AS conv_id, u.id AS user_id, u.name, u.initials, u.role AS role,
+            SELECT c.id AS conv_id, u.id AS user_id, u.name, u.initials, u.avatar_url, u.role AS role,
                    (SELECT m.body FROM messages m WHERE m.conversation_id = c.id ORDER BY m.sent_at DESC LIMIT 1) AS last_msg,
                    (SELECT m.sent_at FROM messages m WHERE m.conversation_id = c.id ORDER BY m.sent_at DESC LIMIT 1) AS last_ts,
                    (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_id != me.id AND m.is_read = false) AS unread
@@ -47,6 +47,7 @@ public class MessagesController {
             item.put("id",       row.get("conv_id"));
             item.put("name",     row.get("name"));
             item.put("initials", row.get("initials"));
+            item.put("avatarUrl", row.get("avatar_url"));
             item.put("role",     row.get("role"));
             item.put("lastMsg",  crypto.decrypt((String) row.get("last_msg")));
             item.put("lastTs",   row.get("last_ts"));
