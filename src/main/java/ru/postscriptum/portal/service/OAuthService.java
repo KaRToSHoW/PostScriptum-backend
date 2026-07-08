@@ -41,7 +41,7 @@ public class OAuthService {
     @Value("${app.oauth.yandex.redirect-uri:}")  private String yandexRedirectUri;
 
     /** Нормализованный профиль из соцсети. */
-    public record OAuthUser(String email, String name) {}
+    public record OAuthUser(String email, String name, String avatarUrl, String phone) {}
 
     public String frontendUrl() {
         return frontendUrl;
@@ -105,13 +105,14 @@ public class OAuthService {
         long   userId      = token.path("user_id").asLong();
         String email       = token.path("email").asText(null);
 
-        // Имя тянем отдельным запросом к API VK
+        // Имя и аватар тянем отдельным запросом к API VK
         String name = "Пользователь VK";
+        String avatar = null;
         try {
             JsonNode profile = rest.get()
                     .uri("https://api.vk.com/method/users.get"
                             + "?user_ids="     + userId
-                            + "&fields=first_name,last_name"
+                            + "&fields=first_name,last_name,photo_200"
                             + "&access_token=" + accessToken
                             + "&v=5.199")
                     .retrieve()
@@ -121,11 +122,12 @@ public class OAuthService {
             String last  = u.path("last_name").asText("");
             String full  = (first + " " + last).trim();
             if (!full.isEmpty()) name = full;
+            avatar = u.path("photo_200").asText(null);
         } catch (Exception ignored) { /* оставим имя по умолчанию */ }
 
         // если email не выдан — синтезируем стабильный, чтобы аккаунт не задваивался
         if (email == null || email.isBlank()) email = "vk" + userId + "@vk.oauth";
-        return new OAuthUser(email, name);
+        return new OAuthUser(email, name, avatar, null);
     }
 
     private OAuthUser fetchYandexUser(String code) {
@@ -161,10 +163,57 @@ public class OAuthService {
         if (name == null || name.isBlank()) name = info.path("display_name").asText(null);
         if (name == null || name.isBlank()) name = "Пользователь Яндекс";
 
+        // портрет пользователя (если не пустой)
+        String avatar = null;
+        if (!info.path("is_avatar_empty").asBoolean(true)) {
+            String avatarId = info.path("default_avatar_id").asText(null);
+            if (avatarId != null && !avatarId.isBlank()) {
+                avatar = "https://avatars.yandex.net/get-yapic/" + avatarId + "/islands-200";
+            }
+        }
+
+        // номер телефона (если приложению выдано право)
+        String phone = info.path("default_phone").path("number").asText(null);
+
         if (email == null || email.isBlank()) {
             email = "ya" + info.path("id").asText("user") + "@yandex.oauth";
         }
-        return new OAuthUser(email, name);
+        return new OAuthUser(email, name, avatar, phone);
+    }
+
+    /**
+     * Профиль по access_token нового VK ID SDK (виджет OneTap на фронте
+     * сам обменивает code → token, бэкенду остаётся забрать данные).
+     */
+    public OAuthUser fetchVkIdUser(String accessToken) {
+        MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
+        form.add("client_id",    vkClientId);
+        form.add("access_token", accessToken);
+
+        JsonNode resp = rest.post()
+                .uri("https://id.vk.com/oauth2/user_info")
+                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                .body(form)
+                .retrieve()
+                .body(JsonNode.class);
+
+        JsonNode u = resp != null ? resp.path("user") : null;
+        if (u == null || u.isMissingNode() || u.isEmpty()) {
+            throw new IllegalStateException("VK ID: не удалось получить профиль");
+        }
+
+        String first = u.path("first_name").asText("");
+        String last  = u.path("last_name").asText("");
+        String name  = (first + " " + last).trim();
+        if (name.isEmpty()) name = "Пользователь VK";
+
+        String email  = u.path("email").asText(null);
+        String phone  = u.path("phone").asText(null);
+        String avatar = u.path("avatar").asText(null);
+        String userId = u.path("user_id").asText("user");
+
+        if (email == null || email.isBlank()) email = "vk" + userId + "@vk.oauth";
+        return new OAuthUser(email, name, avatar, phone);
     }
 
     private static String enc(String v) {

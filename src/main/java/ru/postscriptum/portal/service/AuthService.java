@@ -59,6 +59,10 @@ public class AuthService {
      * если его нет — создаём как ученика со случайным паролем (вход только через соцсеть).
      */
     public AuthResponse oauthLogin(String email, String name) {
+        return oauthLogin(email, name, null, null);
+    }
+
+    public AuthResponse oauthLogin(String email, String name, String avatarUrl, String phone) {
         User user = userRepository.findByEmail(email).orElseGet(() -> {
             String initials = Arrays.stream(name.split("\\s+"))
                     .filter(s -> !s.isEmpty())
@@ -82,6 +86,21 @@ public class AuthService {
         if (!user.isActive()) {
             throw new DisabledException("Аккаунт отключён");
         }
+
+        // дозаполняем профиль из соцсети, но не затираем то, что пользователь задал сам
+        boolean changed = false;
+        if (avatarUrl != null && !avatarUrl.isBlank()
+                && (user.getAvatarUrl() == null || user.getAvatarUrl().isBlank())) {
+            user.setAvatarUrl(avatarUrl);
+            changed = true;
+        }
+        if (phone != null && !phone.isBlank()
+                && (user.getPhone() == null || user.getPhone().isBlank())) {
+            user.setPhone(phone);
+            changed = true;
+        }
+        if (changed) user = userRepository.save(user);
+
         return toResponse(user);
     }
 

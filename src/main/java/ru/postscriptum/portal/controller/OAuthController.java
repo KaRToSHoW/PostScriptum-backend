@@ -33,6 +33,27 @@ public class OAuthController {
         res.sendRedirect(oauthService.buildAuthorizeUrl(provider));
     }
 
+    /**
+     * Вход через виджет VK ID (OneTap): фронт сам обменял code на access_token
+     * и присылает его сюда — отдаём профиль + наш JWT обычным JSON-ответом.
+     */
+    @PostMapping("/vk/token")
+    public org.springframework.http.ResponseEntity<?> vkToken(@RequestBody java.util.Map<String, Object> body) {
+        String accessToken = (String) body.get("accessToken");
+        if (accessToken == null || accessToken.isBlank()) {
+            return org.springframework.http.ResponseEntity.badRequest()
+                .body(java.util.Map.of("message", "Не передан accessToken"));
+        }
+        try {
+            OAuthService.OAuthUser user = oauthService.fetchVkIdUser(accessToken);
+            AuthResponse auth = authService.oauthLogin(user.email(), user.name(), user.avatarUrl(), user.phone());
+            return org.springframework.http.ResponseEntity.ok(auth);
+        } catch (Exception e) {
+            return org.springframework.http.ResponseEntity.status(401)
+                .body(java.util.Map.of("message", "Не удалось войти через VK"));
+        }
+    }
+
     /** Возврат от провайдера: меняем code на профиль, выдаём JWT и уводим на фронт. */
     @GetMapping("/{provider}/callback")
     public void callback(@PathVariable String provider,
@@ -52,7 +73,7 @@ public class OAuthController {
             }
 
             OAuthService.OAuthUser user = oauthService.fetchUser(provider, code);
-            AuthResponse auth = authService.oauthLogin(user.email(), user.name());
+            AuthResponse auth = authService.oauthLogin(user.email(), user.name(), user.avatarUrl(), user.phone());
 
             String token = URLEncoder.encode(auth.token(), StandardCharsets.UTF_8);
             res.sendRedirect(frontend + "/oauth/callback?token=" + token);
