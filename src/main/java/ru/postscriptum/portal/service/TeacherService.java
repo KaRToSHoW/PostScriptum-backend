@@ -37,8 +37,8 @@ public class TeacherService {
         String sql = """
             SELECT u.id, u.name, u.initials, u.email, u.avatar_url,
                    tp.bio, tp.is_native, tp.rating, tp.workload_chip,
-                   STRING_AGG(DISTINCT l.code, ',') AS lang_codes,
-                   STRING_AGG(DISTINCT l.name_ru || ' ' || lv.code, ',') AS lang_names,
+                   STRING_AGG(DISTINCT l.code || '|' || l.name_ru || ' ' || COALESCE(lv.code, ''), ','
+                              ORDER BY l.code || '|' || l.name_ru || ' ' || COALESCE(lv.code, '')) AS lang_pairs,
                    (SELECT tl2.language_id FROM teacher_languages tl2 WHERE tl2.teacher_id = u.id AND tl2.is_primary = true LIMIT 1) AS primary_lang_id
             FROM users u
             LEFT JOIN teacher_profiles tp ON tp.user_id = u.id
@@ -73,17 +73,19 @@ public class TeacherService {
                 } catch (Exception ignore) {}
             }
 
-            // lang names list
-            String langNamesStr = (String) row.get("lang_names");
-            List<String> langs = langNamesStr != null
-                    ? Arrays.asList(langNamesStr.split(","))
-                    : List.of();
-
-            // lang codes list (fr, en, de, ...)
-            String langCodesStr = (String) row.get("lang_codes");
-            List<String> langCodes = langCodesStr != null
-                    ? Arrays.asList(langCodesStr.split(","))
-                    : List.of();
+            // языки: коды и названия склеены в пары "code|name", отсортированы одинаково —
+            // поэтому langs[i] и langCodes[i] всегда соответствуют друг другу (флаг ↔ язык)
+            List<String> langs = new ArrayList<>();
+            List<String> langCodes = new ArrayList<>();
+            String langPairsStr = (String) row.get("lang_pairs");
+            if (langPairsStr != null && !langPairsStr.isBlank()) {
+                for (String pair : langPairsStr.split(",")) {
+                    int sep = pair.indexOf('|');
+                    if (sep < 0) continue;
+                    langCodes.add(pair.substring(0, sep));
+                    langs.add(pair.substring(sep + 1));
+                }
+            }
 
             // student count
             int students = 0;

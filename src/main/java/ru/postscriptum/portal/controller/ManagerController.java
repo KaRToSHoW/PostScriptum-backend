@@ -46,8 +46,8 @@ public class ManagerController {
         if (auth == null) return ResponseEntity.status(401).build();
         List<Map<String, Object>> rows = jdbc.queryForList("""
             SELECT u.id, u.name, u.initials, u.email, u.avatar_url AS "avatarUrl",
-                   STRING_AGG(DISTINCT l.name_ru, ', ' ORDER BY l.name_ru) AS langs,
-                   STRING_AGG(DISTINCT l.code,    ','  ORDER BY l.code)    AS lang_codes
+                   STRING_AGG(DISTINCT l.code || '|' || l.name_ru, ','
+                              ORDER BY l.code || '|' || l.name_ru) AS lang_pairs
             FROM enrollments e
             JOIN users    u ON u.id = e.student_id
             JOIN languages l ON l.id = e.language_id
@@ -58,8 +58,22 @@ public class ManagerController {
         List<Map<String, Object>> result = new ArrayList<>();
         for (Map<String, Object> row : rows) {
             Map<String, Object> item = new LinkedHashMap<>(row);
-            String codes = (String) row.get("lang_codes");
-            item.put("langCodes", codes != null ? List.of(codes.split(",")) : List.of());
+            item.remove("lang_pairs");
+            // коды и названия из одной упорядоченной пары → флаг всегда совпадает с языком
+            List<String> langs = new ArrayList<>();
+            List<String> codes = new ArrayList<>();
+            String pairs = (String) row.get("lang_pairs");
+            if (pairs != null && !pairs.isBlank()) {
+                for (String p : pairs.split(",")) {
+                    int sep = p.indexOf('|');
+                    if (sep < 0) continue;
+                    codes.add(p.substring(0, sep));
+                    langs.add(p.substring(sep + 1));
+                }
+            }
+            item.put("langs", langs);
+            item.put("langCodes", codes);
+            item.put("languages", String.join(", ", langs));
             result.add(item);
         }
         return ResponseEntity.ok(result);
