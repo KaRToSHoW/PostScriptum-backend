@@ -1,12 +1,13 @@
 package ru.postscriptum.portal.service;
 
 import jakarta.annotation.PostConstruct;
+import jakarta.mail.internet.MimeMessage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
+import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
@@ -118,8 +119,13 @@ public class PasswordResetService {
     // ─── helpers ────────────────────────────────────────────────────────────
 
     private void sendResetEmail(String to, String name, String link) {
-        String body = """
-            Здравствуйте, %s!
+        boolean hasName = name != null && !name.isBlank();
+        String plainGreeting = hasName ? "Здравствуйте, " + name + "!" : "Здравствуйте!";
+        String htmlGreeting  = hasName ? "Здравствуйте, " + escape(name) + "!" : "Здравствуйте!";
+
+        // Текстовая версия (для клиентов без HTML)
+        String plain = """
+            %s
 
             Вы запросили сброс пароля в Post Scriptum.
             Чтобы задать новый пароль, перейдите по ссылке (действует 1 час):
@@ -129,8 +135,15 @@ public class PasswordResetService {
             Если вы не запрашивали сброс — просто проигнорируйте это письмо,
             пароль останется прежним.
 
+            Это автоматическое письмо. Наш пингвин не умеет читать ответы,
+            поэтому отвечать на него не стоит.
+
             — Команда Post Scriptum
-            """.formatted(name != null ? name : "", link);
+            """.formatted(plainGreeting, link);
+
+        String html = EMAIL_TEMPLATE
+            .replace("{{greeting}}", htmlGreeting)
+            .replace("{{link}}", link);
 
         if (smtpHost == null || smtpHost.isBlank()) {
             // SMTP не настроен — не роняем поток, пишем ссылку в лог (dev-режим)
@@ -138,16 +151,94 @@ public class PasswordResetService {
             return;
         }
         try {
-            SimpleMailMessage msg = new SimpleMailMessage();
-            msg.setFrom(mailFrom);
-            msg.setTo(to);
-            msg.setSubject("Сброс пароля — Post Scriptum");
-            msg.setText(body);
+            MimeMessage msg = mailSender.createMimeMessage();
+            MimeMessageHelper helper = new MimeMessageHelper(msg, MimeMessageHelper.MULTIPART_MODE_MIXED_RELATED, "UTF-8");
+            helper.setFrom(mailFrom, "Post Scriptum");
+            helper.setTo(to);
+            helper.setSubject("Сброс пароля — Post Scriptum");
+            helper.setText(plain, html);   // text + html
             mailSender.send(msg);
         } catch (Exception e) {
             log.error("Не удалось отправить письмо сброса пароля на {}: {}", to, e.getMessage());
         }
     }
+
+    /** Экранируем пользовательское имя, чтобы не сломать HTML. */
+    private static String escape(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+    }
+
+    /* Брендовый HTML-шаблон письма (inline-стили — требование почтовых клиентов). */
+    private static final String EMAIL_TEMPLATE = """
+        <!DOCTYPE html>
+        <html lang="ru">
+        <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+        <body style="margin:0;padding:0;background:#F4EFE7;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
+          <div style="display:none;max-height:0;overflow:hidden;opacity:0;">Ссылка для сброса пароля действует 1 час.</div>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F4EFE7;padding:32px 12px;">
+            <tr><td align="center">
+              <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="width:480px;max-width:100%;background:#ffffff;border-radius:22px;overflow:hidden;box-shadow:0 12px 40px rgba(43,32,115,.12);">
+
+                <!-- Шапка -->
+                <tr><td style="background:#6C5CE7;padding:30px 34px;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+                    <td style="font-family:'Unbounded',Arial,sans-serif;font-size:22px;font-weight:800;color:#ffffff;letter-spacing:.04em;">
+                      POST <span style="color:#FBD38D;">SCRIPTUM</span>
+                    </td>
+                    <td align="right" style="font-size:30px;">🐧</td>
+                  </tr></table>
+                  <div style="font-size:13px;color:rgba(255,255,255,.8);font-style:italic;margin-top:6px;">искусство свободной речи</div>
+                </td></tr>
+
+                <!-- Тело -->
+                <tr><td style="padding:32px 34px 24px;">
+                  <div style="font-size:19px;font-weight:800;color:#2B2073;margin-bottom:14px;">{{greeting}}</div>
+                  <p style="font-size:15px;line-height:1.6;color:#3d3a52;margin:0 0 20px;">
+                    Вы запросили сброс пароля в личном кабинете Post Scriptum.
+                    Нажмите на кнопку ниже, чтобы задать новый пароль.
+                  </p>
+
+                  <!-- Кнопка -->
+                  <table role="presentation" cellpadding="0" cellspacing="0" style="margin:8px 0 22px;"><tr>
+                    <td style="border-radius:14px;background:#F29A2E;box-shadow:0 8px 18px rgba(242,154,46,.4);">
+                      <a href="{{link}}" target="_blank"
+                         style="display:inline-block;padding:15px 34px;font-size:15px;font-weight:800;color:#ffffff;text-decoration:none;border-radius:14px;">
+                        Задать новый пароль
+                      </a>
+                    </td>
+                  </tr></table>
+
+                  <p style="font-size:13px;line-height:1.6;color:#8a869c;margin:0 0 6px;">
+                    Ссылка действует <b style="color:#6C5CE7;">1 час</b>. Если кнопка не работает, скопируйте адрес в браузер:
+                  </p>
+                  <p style="font-size:12px;line-height:1.5;word-break:break-all;margin:0 0 22px;">
+                    <a href="{{link}}" style="color:#6C5CE7;">{{link}}</a>
+                  </p>
+
+                  <div style="height:1px;background:#ece8f5;margin:0 0 18px;"></div>
+                  <p style="font-size:13px;line-height:1.6;color:#8a869c;margin:0;">
+                    Если вы не запрашивали сброс — просто проигнорируйте это письмо,
+                    пароль останется прежним.
+                  </p>
+                </td></tr>
+
+                <!-- Подвал -->
+                <tr><td style="padding:20px 34px 28px;background:#faf8ff;">
+                  <p style="font-size:12px;line-height:1.6;color:#a09cb3;margin:0 0 6px;">
+                    Это автоматическое письмо. Наш пингвин не умеет читать ответы,
+                    поэтому отвечать на него не стоит. 🐧
+                  </p>
+                  <p style="font-size:12px;color:#a09cb3;margin:0;">
+                    © Post Scriptum · <a href="https://postscriptum-online.ru" style="color:#6C5CE7;text-decoration:none;">postscriptum-online.ru</a>
+                  </p>
+                </td></tr>
+
+              </table>
+            </td></tr>
+          </table>
+        </body>
+        </html>
+        """;
 
     private static String randomToken() {
         byte[] buf = new byte[32];
