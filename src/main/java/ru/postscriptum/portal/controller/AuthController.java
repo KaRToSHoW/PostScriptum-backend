@@ -11,6 +11,7 @@ import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.*;
 import ru.postscriptum.portal.dto.*;
 import ru.postscriptum.portal.service.AuthService;
+import ru.postscriptum.portal.service.PasswordResetService;
 
 import java.util.Map;
 
@@ -20,6 +21,7 @@ import java.util.Map;
 public class AuthController {
 
     private final AuthService authService;
+    private final PasswordResetService passwordResetService;
 
     @PostMapping("/login")
     public ResponseEntity<?> login(@Valid @RequestBody LoginRequest req) {
@@ -49,25 +51,34 @@ public class AuthController {
         return ResponseEntity.ok(authService.me(user.getUsername()));
     }
 
-    /** Сброс пароля по email: { email, newPassword } → новый пароль + вход. */
-    @PostMapping("/reset-password")
-    public ResponseEntity<?> resetPassword(@RequestBody Map<String, String> body) {
-        String email       = body.get("email");
-        String newPassword = body.get("newPassword");
+    /** Шаг 1: запрос ссылки на сброс. Ответ всегда одинаковый — не раскрываем, есть ли такой email. */
+    @PostMapping("/forgot-password")
+    public ResponseEntity<?> forgotPassword(@RequestBody Map<String, String> body) {
+        String email = body.get("email");
         if (email == null || email.isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("message", "Укажите email"));
+        }
+        passwordResetService.requestReset(email.trim());
+        return ResponseEntity.ok(Map.of(
+            "message", "Если такой email зарегистрирован, мы отправили на него ссылку для сброса пароля."));
+    }
+
+    /** Шаг 2: установка нового пароля по токену из письма. */
+    @PostMapping("/reset-password")
+    public ResponseEntity<?> resetPassword(@RequestBody Map<String, String> body) {
+        String token       = body.get("token");
+        String newPassword = body.get("newPassword");
+        if (token == null || token.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Некорректная ссылка сброса"));
         }
         if (newPassword == null || newPassword.length() < 6) {
             return ResponseEntity.badRequest().body(Map.of("message", "Пароль минимум 6 символов"));
         }
-        try {
-            return ResponseEntity.ok(authService.resetPassword(email.trim(), newPassword));
-        } catch (DisabledException e) {
-            return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                    .body(Map.of("message", "Аккаунт отключён. Обратитесь к администратору."));
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                    .body(Map.of("message", e.getMessage()));
+        boolean ok = passwordResetService.resetPassword(token, newPassword);
+        if (!ok) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(Map.of("message", "Ссылка недействительна или устарела. Запросите сброс заново."));
         }
+        return ResponseEntity.ok(Map.of("message", "Пароль изменён. Теперь войдите с новым паролем."));
     }
 }
