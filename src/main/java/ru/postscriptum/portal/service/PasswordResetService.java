@@ -157,6 +157,7 @@ public class PasswordResetService {
             helper.setTo(to);
             helper.setSubject("Сброс пароля — Post Scriptum");
             helper.setText(plain, html);   // text + html
+            helper.addInline("penguin", new org.springframework.core.io.ClassPathResource("mail/penguin-happy.png"));
             mailSender.send(msg);
         } catch (Exception e) {
             log.error("Не удалось отправить письмо сброса пароля на {}: {}", to, e.getMessage());
@@ -185,7 +186,7 @@ public class PasswordResetService {
                     <td style="font-family:'Unbounded',Arial,sans-serif;font-size:22px;font-weight:800;color:#ffffff;letter-spacing:.04em;">
                       POST <span style="color:#FBD38D;">SCRIPTUM</span>
                     </td>
-                    <td align="right" style="font-size:30px;">🐧</td>
+                    <td align="right" width="60"><img src="cid:penguin" alt="" width="56" style="display:block;border:0;"></td>
                   </tr></table>
                   <div style="font-size:13px;color:rgba(255,255,255,.8);font-style:italic;margin-top:6px;">искусство свободной речи</div>
                 </td></tr>
@@ -226,7 +227,8 @@ public class PasswordResetService {
                 <tr><td style="padding:20px 34px 28px;background:#faf8ff;">
                   <p style="font-size:12px;line-height:1.6;color:#a09cb3;margin:0 0 6px;">
                     Это автоматическое письмо. Наш пингвин не умеет читать ответы,
-                    поэтому отвечать на него не стоит. 🐧
+                    поэтому отвечать на него не стоит.
+                    <img src="cid:penguin" alt="" width="16" style="vertical-align:-4px;border:0;">
                   </p>
                   <p style="font-size:12px;color:#a09cb3;margin:0;">
                     © Post Scriptum · <a href="https://postscriptum-online.ru" style="color:#6C5CE7;text-decoration:none;">postscriptum-online.ru</a>

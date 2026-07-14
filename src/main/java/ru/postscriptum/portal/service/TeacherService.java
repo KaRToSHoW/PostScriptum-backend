@@ -701,7 +701,8 @@ public class TeacherService {
         Timestamp keepOriginal = originalDate != null ? (Timestamp) originalDate : (Timestamp) lesson.get("scheduled_at");
 
         jdbc.update("""
-            UPDATE lessons SET scheduled_at=?, original_date=?, reschedule_count=reschedule_count+1, last_rescheduled_at=NOW()
+            UPDATE lessons SET scheduled_at=?, original_date=?, reschedule_count=reschedule_count+1,
+                               last_rescheduled_at=NOW(), reminder_sent=FALSE
             WHERE id=?
             """, newTs, keepOriginal, lessonId);
 
