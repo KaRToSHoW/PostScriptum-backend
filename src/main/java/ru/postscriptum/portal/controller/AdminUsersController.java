@@ -166,40 +166,50 @@ public class AdminUsersController {
             return ResponseEntity.status(409).body(Map.of("message", "Нельзя удалить свой аккаунт"));
         }
 
-        // блокируем удаление, если есть учебные/финансовые связи — такие аккаунты деактивируют
+        // блокируем удаление, если есть учебные/финансовые/авторские связи — такие аккаунты деактивируют
         Integer data = jdbc.queryForObject("""
-            SELECT (SELECT COUNT(*) FROM enrollments    WHERE student_id=? OR teacher_id=?)
-                 + (SELECT COUNT(*) FROM lessons        WHERE teacher_id=?)
-                 + (SELECT COUNT(*) FROM lesson_students WHERE student_id=?)
-                 + (SELECT COUNT(*) FROM subscriptions  WHERE student_id=?)
-                 + (SELECT COUNT(*) FROM payments       WHERE student_id=?)
-            """, Integer.class, id, id, id, id, id, id);
+            SELECT (SELECT COUNT(*) FROM enrollments                 WHERE student_id=? OR teacher_id=?)
+                 + (SELECT COUNT(*) FROM lessons                     WHERE teacher_id=?)
+                 + (SELECT COUNT(*) FROM lesson_students             WHERE student_id=?)
+                 + (SELECT COUNT(*) FROM subscriptions               WHERE student_id=?)
+                 + (SELECT COUNT(*) FROM payments                    WHERE student_id=?)
+                 + (SELECT COUNT(*) FROM homework                    WHERE student_id=? OR teacher_id=?)
+                 + (SELECT COUNT(*) FROM speaking_clubs              WHERE teacher_id=?)
+                 + (SELECT COUNT(*) FROM speaking_club_registrations WHERE student_id=?)
+                 + (SELECT COUNT(*) FROM reports                     WHERE created_by=?)
+                 + (SELECT COUNT(*) FROM course_materials            WHERE created_by=?)
+                 + (SELECT COUNT(*) FROM payment_refunds             WHERE processed_by=?)
+                 + (SELECT COUNT(*) FROM student_profiles            WHERE parent_id=?)
+            """, Integer.class, id, id, id, id, id, id, id, id, id, id, id, id, id, id);
         if (data != null && data > 0) {
             return ResponseEntity.status(409).body(Map.of("message",
                 "У пользователя есть учебные или финансовые данные. Деактивируйте аккаунт вместо удаления."));
         }
 
-        // чистим переписку/онбординг — иначе внешние ключи не дадут удалить
+        // чистим побочные ссылки (переписка, заявки, журналы) — иначе внешние ключи не дадут удалить
         jdbc.update("DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE support_owner_id=?)", id);
-        jdbc.update("DELETE FROM conversation_members WHERE conversation_id IN (SELECT id FROM conversations WHERE support_owner_id=?)", id);
-        jdbc.update("DELETE FROM conversations WHERE support_owner_id=?", id);
-        jdbc.update("DELETE FROM messages WHERE sender_id=?", id);
-        jdbc.update("UPDATE leads SET converted_user_id=NULL WHERE converted_user_id=?", id);
-        // остальное (notifications, conversation_members, user_settings, профили, токены) удалится каскадом
+        jdbc.update("DELETE FROM conversations       WHERE support_owner_id=?", id);
+        jdbc.update("DELETE FROM messages            WHERE sender_id=?", id);
+        jdbc.update("DELETE FROM lead_activities     WHERE user_id=?", id);
+        jdbc.update("DELETE FROM audit_log           WHERE user_id=?", id);
+        jdbc.update("DELETE FROM student_attention   WHERE teacher_id=? OR student_id=?", id, id);
+        jdbc.update("DELETE FROM teacher_availability WHERE teacher_id=?", id);
+        jdbc.update("UPDATE leads                SET assigned_to=NULL      WHERE assigned_to=?", id);
+        jdbc.update("UPDATE leads                SET converted_user_id=NULL WHERE converted_user_id=?", id);
+        jdbc.update("UPDATE system_settings      SET updated_by=NULL       WHERE updated_by=?", id);
+        jdbc.update("UPDATE homework_submissions SET reviewed_by=NULL      WHERE reviewed_by=?", id);
+        jdbc.update("UPDATE lesson_events        SET changed_by=NULL       WHERE changed_by=?", id);
+        jdbc.update("UPDATE lesson_history       SET changed_by=NULL       WHERE changed_by=?", id);
+        // остальное (notifications, conversation_members, user_settings, профили, токены, stored_files) — каскад/SET NULL
 
-        try {
-            int rows = jdbc.update("DELETE FROM users WHERE id=?", id);
-            if (rows == 0) return ResponseEntity.status(404).body(Map.of("message", "Пользователь не найден"));
-            return ResponseEntity.ok().build();
-        } catch (DataIntegrityViolationException e) {
-            throw new RelatedDataException();  // откатит очистку и вернёт 409
-        }
+        int rows = jdbc.update("DELETE FROM users WHERE id=?", id);
+        if (rows == 0) return ResponseEntity.status(404).body(Map.of("message", "Пользователь не найден"));
+        return ResponseEntity.ok().build();
     }
 
-    private static class RelatedDataException extends RuntimeException {}
-
-    @ExceptionHandler(RelatedDataException.class)
-    public ResponseEntity<?> onRelatedData() {
+    /** Любая недочищенная связь → аккуратный 409 «деактивируйте», а не 500 (@Transactional откатит очистку). */
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<?> onRelatedData(DataIntegrityViolationException e) {
         return ResponseEntity.status(409).body(Map.of("message",
             "У пользователя есть связанные данные. Деактивируйте аккаунт вместо удаления."));
     }
