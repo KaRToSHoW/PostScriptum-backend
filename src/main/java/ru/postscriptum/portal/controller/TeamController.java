@@ -84,7 +84,7 @@ public class TeamController {
         if (auth == null) return ResponseEntity.ok(List.of());
 
         List<Map<String, Object>> result = jdbc.query(
-            "SELECT le.id, le.name, le.status, " +
+            "SELECT le.id, le.name, le.status, le.phone, le.email, le.notes, le.source, " +
             "       COALESCE(lang.code,'') AS lang, " +
             "       CONCAT_WS(' · ', lang.name_ru, lv.code, le.preferred_time, le.frequency) AS details, " +
             "       le.received_at " +
@@ -98,9 +98,14 @@ public class TeamController {
                 row.put("name", rs.getString("name"));
                 row.put("details", rs.getString("details"));
                 row.put("lang", rs.getString("lang"));
+                row.put("phone", rs.getString("phone"));
+                row.put("email", rs.getString("email"));
+                row.put("comment", rs.getString("notes"));
+                row.put("source", rs.getString("source"));
 
                 String status = rs.getString("status");
                 row.put("isNew", "NEW".equals(status));
+                row.put("status", status);
 
                 Timestamp ts = rs.getTimestamp("received_at");
                 row.put("receivedAt", ts != null ? humanizeTime(ts.toLocalDateTime()) : "—");

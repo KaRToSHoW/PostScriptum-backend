@@ -1,11 +1,13 @@
 package ru.postscriptum.portal.controller;
 
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Arrays;
@@ -145,6 +147,61 @@ public class AdminUsersController {
         );
 
         return ResponseEntity.ok().build();
+    }
+
+    // ─── DELETE /{id} ──────────────────────────────────────────────────────
+
+    /**
+     * Удаление пользователя. Аккаунты с учебными/финансовыми данными удалять нельзя
+     * (их нужно деактивировать) — так мы не теряем историю уроков и оплат.
+     * Для «пустых» аккаунтов (тестовые, ошибочные, свежие заявки) чистим переписку и удаляем.
+     */
+    @DeleteMapping("/{id}")
+    @Transactional
+    public ResponseEntity<?> deleteUser(@PathVariable long id, Authentication auth) {
+        if (auth == null) return ResponseEntity.status(401).build();
+
+        Long myId = jdbc.queryForObject("SELECT id FROM users WHERE email=?", Long.class, auth.getName());
+        if (myId != null && myId == id) {
+            return ResponseEntity.status(409).body(Map.of("message", "Нельзя удалить свой аккаунт"));
+        }
+
+        // блокируем удаление, если есть учебные/финансовые связи — такие аккаунты деактивируют
+        Integer data = jdbc.queryForObject("""
+            SELECT (SELECT COUNT(*) FROM enrollments    WHERE student_id=? OR teacher_id=?)
+                 + (SELECT COUNT(*) FROM lessons        WHERE teacher_id=?)
+                 + (SELECT COUNT(*) FROM lesson_students WHERE student_id=?)
+                 + (SELECT COUNT(*) FROM subscriptions  WHERE student_id=?)
+                 + (SELECT COUNT(*) FROM payments       WHERE student_id=?)
+            """, Integer.class, id, id, id, id, id, id);
+        if (data != null && data > 0) {
+            return ResponseEntity.status(409).body(Map.of("message",
+                "У пользователя есть учебные или финансовые данные. Деактивируйте аккаунт вместо удаления."));
+        }
+
+        // чистим переписку/онбординг — иначе внешние ключи не дадут удалить
+        jdbc.update("DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE support_owner_id=?)", id);
+        jdbc.update("DELETE FROM conversation_members WHERE conversation_id IN (SELECT id FROM conversations WHERE support_owner_id=?)", id);
+        jdbc.update("DELETE FROM conversations WHERE support_owner_id=?", id);
+        jdbc.update("DELETE FROM messages WHERE sender_id=?", id);
+        jdbc.update("UPDATE leads SET converted_user_id=NULL WHERE converted_user_id=?", id);
+        // остальное (notifications, conversation_members, user_settings, профили, токены) удалится каскадом
+
+        try {
+            int rows = jdbc.update("DELETE FROM users WHERE id=?", id);
+            if (rows == 0) return ResponseEntity.status(404).body(Map.of("message", "Пользователь не найден"));
+            return ResponseEntity.ok().build();
+        } catch (DataIntegrityViolationException e) {
+            throw new RelatedDataException();  // откатит очистку и вернёт 409
+        }
+    }
+
+    private static class RelatedDataException extends RuntimeException {}
+
+    @ExceptionHandler(RelatedDataException.class)
+    public ResponseEntity<?> onRelatedData() {
+        return ResponseEntity.status(409).body(Map.of("message",
+            "У пользователя есть связанные данные. Деактивируйте аккаунт вместо удаления."));
     }
 
     // ─── helpers ──────────────────────────────────────────────────────────

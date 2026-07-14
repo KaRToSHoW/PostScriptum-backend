@@ -25,6 +25,7 @@ public class AssignmentController {
 
     private final JdbcTemplate jdbc;
     private final PasswordEncoder passwordEncoder;
+    private final ru.postscriptum.portal.service.MailService mailService;
 
     // ─── POST /api/admin/assign-teacher ────────────────────────────────────
 
@@ -132,31 +133,23 @@ public class AssignmentController {
 
             String name  = (String) lead.get("name");
             String email = (String) lead.get("email");
-            if (email == null || email.isBlank()) {
+            boolean hasRealEmail = email != null && !email.isBlank();   // есть куда слать доступы
+            if (!hasRealEmail) {
                 email = "lead" + id + "@imported.ps";
             }
 
             String initials = computeInitials(name);
-            String tempPassword = passwordEncoder.encode(UUID.randomUUID().toString());
+            String plainPassword = generatePassword();               // отдадим менеджеру, чтобы передать клиенту
+            String tempPassword = passwordEncoder.encode(plainPassword);
 
             final String finalEmail = email;
             final String finalName  = name;
-            KeyHolder kh = new GeneratedKeyHolder();
-            jdbc.update(con -> {
-                PreparedStatement ps = con.prepareStatement(
-                    "INSERT INTO users (name, email, initials, password_hash, role, " +
-                    "                  is_active, timezone, locale, created_at, updated_at) " +
-                    "VALUES (?, ?, ?, ?, 'STUDENT'::user_role, true, 'Europe/Moscow', 'ru', NOW(), NOW())",
-                    Statement.RETURN_GENERATED_KEYS
-                );
-                ps.setString(1, finalName);
-                ps.setString(2, finalEmail);
-                ps.setString(3, initials);
-                ps.setString(4, tempPassword);
-                return ps;
-            }, kh);
-
-            long userId = kh.getKey().longValue();
+            // RETURNING id — надёжнее getGeneratedKeys (Postgres иначе возвращает все колонки)
+            long userId = jdbc.queryForObject(
+                "INSERT INTO users (name, email, initials, password_hash, role, " +
+                "                  is_active, timezone, locale, created_at, updated_at) " +
+                "VALUES (?, ?, ?, ?, 'STUDENT'::user_role, true, 'Europe/Moscow', 'ru', NOW(), NOW()) RETURNING id",
+                Long.class, finalName, finalEmail, initials, tempPassword);
 
             // Insert student_profiles
             jdbc.update(
@@ -170,7 +163,18 @@ public class AssignmentController {
                 userId, id
             );
 
-            return ResponseEntity.ok(Map.of("userId", userId));
+            // если у заявки был настоящий email — сразу шлём доступы письмом
+            boolean emailed = false;
+            if (hasRealEmail) {
+                emailed = mailService.sendAccountCredentials(finalEmail, finalName, finalEmail, plainPassword);
+            }
+
+            // возвращаем логин и временный пароль — менеджер передаст их клиенту (если письмо не ушло)
+            return ResponseEntity.ok(Map.of(
+                "userId",   userId,
+                "email",    finalEmail,
+                "password", plainPassword,
+                "emailed",  emailed));
 
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
@@ -192,5 +196,15 @@ public class AssignmentController {
                 .limit(2)
                 .map(w -> String.valueOf(w.charAt(0)).toUpperCase())
                 .collect(Collectors.joining());
+    }
+
+    // Читаемый временный пароль без похожих символов (0/O, 1/l/I) — удобно продиктовать по телефону
+    private static final java.security.SecureRandom RND = new java.security.SecureRandom();
+    private static final String PWD_ALPHABET = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+    private String generatePassword() {
+        StringBuilder sb = new StringBuilder(8);
+        for (int i = 0; i < 8; i++) sb.append(PWD_ALPHABET.charAt(RND.nextInt(PWD_ALPHABET.length())));
+        return sb.toString();
     }
 }

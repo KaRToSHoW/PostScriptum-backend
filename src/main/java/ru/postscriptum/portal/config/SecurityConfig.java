@@ -44,6 +44,8 @@ public class SecurityConfig {
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 .requestMatchers("/api/auth/**", "/h2-console/**", "/error").permitAll()
+                // Публичная заявка «запись через менеджера» со страницы входа
+                .requestMatchers(HttpMethod.POST, "/api/leads").permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/teachers", "/api/teachers/**").permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/files/**").permitAll()
                 // Управление пользователями (создание, смена роли, активация/деактивация

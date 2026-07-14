@@ -20,6 +20,12 @@ import java.util.Map;
 public class SupportController {
 
     private final JdbcTemplate jdbc;
+    private final ru.postscriptum.portal.service.MessageCryptoService crypto;
+
+    private static final String GREETING =
+        "Здравствуйте! 👋 Я ваш персональный менеджер Post Scriptum. "
+        + "Помогу выбрать программу, преподавателя и удобное расписание. "
+        + "С какого языка хотите начать?";
 
     @PostMapping("/start")
     public ResponseEntity<?> start(Authentication auth) {
@@ -44,6 +50,11 @@ public class SupportController {
         jdbc.update(
             "INSERT INTO conversation_members (conversation_id, user_id) VALUES (?,?),(?,?)",
             convId, me, convId, managerId);
+
+        // Автоприветствие от менеджера — чтобы новый пользователь сразу видел живой чат
+        jdbc.update(
+            "INSERT INTO messages (conversation_id, sender_id, body, is_read, sent_at) VALUES (?,?,?,false,NOW())",
+            convId, managerId, crypto.encrypt(GREETING));
 
         jdbc.update("""
             INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at)
