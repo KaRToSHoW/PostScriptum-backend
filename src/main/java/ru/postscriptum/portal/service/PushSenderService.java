@@ -113,6 +113,12 @@ public class PushSenderService {
     /** Рассылает пуш всем подпискам пользователя. Протухшие подписки (404/410) удаляем. */
     public void sendToUser(long userId, String title, String body, String link) {
         if (pushService == null) return;
+
+        // уважаем тумблер «push-уведомления» в настройках пользователя
+        List<Map<String, Object>> pref = jdbc.queryForList(
+            "SELECT notification_push FROM user_settings WHERE user_id=?", userId);
+        if (!pref.isEmpty() && Boolean.FALSE.equals(pref.get(0).get("notification_push"))) return;
+
         List<Map<String, Object>> subs = jdbc.queryForList(
             "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id=?", userId);
         if (subs.isEmpty()) return;
