@@ -31,12 +31,17 @@ public class SupportController {
         + "С какого языка хотите начать?";
 
     /**
-     * Схлопывает задвоившиеся диалоги поддержки (их плодил балансер, пока не было
-     * уникального индекса) и ставит уникальный индекс, чтобы больше не плодились.
-     * Идемпотентно — безопасно выполнять на каждом старте инстанса.
+     * Готовит схему под чат поддержки. Идемпотентно — безопасно на каждом старте инстанса.
+     * На проде столбец support_owner_id не доехал (дрейф схемы), из-за чего падали и удаление
+     * пользователя, и /support/start — добавляем его без ручной миграции.
      */
     @PostConstruct
-    void dedupeSupportConversations() {
+    void initSupportSchema() {
+        try {
+            jdbc.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS support_owner_id BIGINT REFERENCES users(id)");
+        } catch (Exception e) {
+            log.error("Не удалось добавить conversations.support_owner_id: {}", e.getMessage());
+        }
         try {
             dedupeAndIndex();
         } catch (Exception e) {
