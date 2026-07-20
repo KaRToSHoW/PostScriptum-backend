@@ -43,7 +43,7 @@ public class LeadController {
             jdbc.update("""
                 INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at)
                 SELECT u.id, 'NEW_MESSAGE'::notification_type, 'Новая заявка на запись',
-                       ?, '/admin/roles', false, NOW()
+                       ?, '/leads', false, NOW()
                 FROM users u
                 WHERE u.role IN ('MANAGER'::user_role, 'ADMIN'::user_role) AND u.is_active = true
                 """, name + " · " + contact);

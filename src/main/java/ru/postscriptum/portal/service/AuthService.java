@@ -20,6 +20,7 @@ public class AuthService {
     private final PasswordEncoder      passwordEncoder;
     private final AuthenticationManager authManager;
     private final JwtTokenProvider     tokenProvider;
+    private final LeadService          leadService;
 
     public AuthResponse login(LoginRequest req) {
         authManager.authenticate(
@@ -51,6 +52,9 @@ public class AuthService {
                 .active(true)
                 .build());
 
+        // заявка менеджеру на распределение нового ученика
+        leadService.createRegistrationLead(user.getName(), user.getEmail(), null, "Регистрация на портале");
+
         return toResponse(user);
     }
 
@@ -63,6 +67,7 @@ public class AuthService {
     }
 
     public AuthResponse oauthLogin(String email, String name, String avatarUrl, String phone) {
+        boolean isNewUser = userRepository.findByEmail(email).isEmpty();
         User user = userRepository.findByEmail(email).orElseGet(() -> {
             String initials = Arrays.stream(name.split("\\s+"))
                     .filter(s -> !s.isEmpty())
@@ -100,6 +105,11 @@ public class AuthService {
             changed = true;
         }
         if (changed) user = userRepository.save(user);
+
+        // первый вход через соцсеть = новая регистрация → заявка на распределение
+        if (isNewUser) {
+            leadService.createRegistrationLead(user.getName(), user.getEmail(), user.getPhone(), "Регистрация через соцсеть");
+        }
 
         return toResponse(user);
     }

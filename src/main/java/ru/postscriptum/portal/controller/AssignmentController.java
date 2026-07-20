@@ -39,51 +39,112 @@ public class AssignmentController {
             long teacherId = toLong(body.get("teacherId"));
             String languageCode = (String) body.get("languageCode");
 
-            // 1. Find language id
-            Long languageId;
-            try {
-                languageId = jdbc.queryForObject(
-                    "SELECT id FROM languages WHERE code=?", Long.class, languageCode
-                );
-            } catch (EmptyResultDataAccessException e) {
-                return ResponseEntity.badRequest().body(Map.of("message", "Язык не найден: " + languageCode));
-            }
-
-            // 2. Check existing enrollment for this student+teacher+language
-            List<Map<String, Object>> existing = jdbc.queryForList(
-                "SELECT id FROM enrollments WHERE student_id=? AND teacher_id=? AND language_id=?",
-                studentId, teacherId, languageId
-            );
-            if (!existing.isEmpty()) {
-                jdbc.update(
-                    "UPDATE enrollments SET is_active=true WHERE student_id=? AND teacher_id=? AND language_id=?",
-                    studentId, teacherId, languageId
-                );
-            } else {
-                jdbc.update(
-                    "INSERT INTO enrollments (student_id, teacher_id, language_id, start_date, " +
-                    "                        lessons_done, lessons_total, is_active) " +
-                    "VALUES (?, ?, ?, NOW()::date, 0, 0, true)",
-                    studentId, teacherId, languageId
-                );
-            }
-
-            // 4. Notify student
-            jdbc.update(
-                "INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at) " +
-                "VALUES (?, 'SYSTEM'::notification_type, 'Назначение преподавателя', " +
-                "        'Вам назначен новый преподаватель', '/teachers', false, NOW())",
-                studentId
-            );
-            // Notify teacher
-            jdbc.update(
-                "INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at) " +
-                "VALUES (?, 'SYSTEM'::notification_type, 'Новый ученик', " +
-                "        'Вам назначен новый ученик', '/students', false, NOW())",
-                teacherId
-            );
+            ResponseEntity<?> err = doAssign(studentId, teacherId, languageCode);
+            if (err != null) return err;
 
             return ResponseEntity.ok(Map.of("ok", true));
+
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    /** Общая логика назначения: enrollment + уведомления. null — успех, иначе ответ-ошибка. */
+    private ResponseEntity<?> doAssign(long studentId, long teacherId, String languageCode) {
+        // 1. Find language id
+        Long languageId;
+        try {
+            languageId = jdbc.queryForObject(
+                "SELECT id FROM languages WHERE code=?", Long.class, languageCode
+            );
+        } catch (EmptyResultDataAccessException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Язык не найден: " + languageCode));
+        }
+
+        // 2. Check existing enrollment for this student+teacher+language
+        List<Map<String, Object>> existing = jdbc.queryForList(
+            "SELECT id FROM enrollments WHERE student_id=? AND teacher_id=? AND language_id=?",
+            studentId, teacherId, languageId
+        );
+        if (!existing.isEmpty()) {
+            jdbc.update(
+                "UPDATE enrollments SET is_active=true WHERE student_id=? AND teacher_id=? AND language_id=?",
+                studentId, teacherId, languageId
+            );
+        } else {
+            jdbc.update(
+                "INSERT INTO enrollments (student_id, teacher_id, language_id, start_date, " +
+                "                        lessons_done, lessons_total, is_active) " +
+                "VALUES (?, ?, ?, NOW()::date, 0, 0, true)",
+                studentId, teacherId, languageId
+            );
+        }
+
+        // 3. Notify student
+        jdbc.update(
+            "INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at) " +
+            "VALUES (?, 'SYSTEM'::notification_type, 'Назначение преподавателя', " +
+            "        'Вам назначен новый преподаватель', '/teachers', false, NOW())",
+            studentId
+        );
+        // Notify teacher
+        jdbc.update(
+            "INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at) " +
+            "VALUES (?, 'SYSTEM'::notification_type, 'Новый ученик', " +
+            "        'Вам назначен новый ученик', '/students', false, NOW())",
+            teacherId
+        );
+
+        return null;
+    }
+
+    // ─── POST /api/admin/leads/{id}/assign ────────────────────────────────
+    // Заявка от уже зарегистрировавшегося ученика: аккаунт существует,
+    // создавать ничего не нужно — только распределить к преподавателю.
+
+    @PostMapping("/leads/{id}/assign")
+    public ResponseEntity<?> assignLead(@PathVariable long id,
+                                        @RequestBody Map<String, Object> body,
+                                        Authentication auth) {
+        if (auth == null) return ResponseEntity.status(401).build();
+
+        try {
+            Map<String, Object> lead;
+            try {
+                lead = jdbc.queryForMap("SELECT email FROM leads WHERE id=?", id);
+            } catch (EmptyResultDataAccessException e) {
+                return ResponseEntity.badRequest().body(Map.of("message", "Лид не найден"));
+            }
+
+            String email = (String) lead.get("email");
+            if (email == null || email.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("message", "У заявки нет email — аккаунт не найти"));
+            }
+
+            Long studentId;
+            try {
+                studentId = jdbc.queryForObject("SELECT id FROM users WHERE email=?", Long.class, email);
+            } catch (EmptyResultDataAccessException e) {
+                return ResponseEntity.badRequest().body(Map.of("message", "Аккаунт с email " + email + " не найден"));
+            }
+
+            long teacherId = toLong(body.get("teacherId"));
+            String languageCode = (String) body.get("languageCode");
+
+            ResponseEntity<?> err = doAssign(studentId, teacherId, languageCode);
+            if (err != null) return err;
+
+            // профиль ученика на всякий случай + закрываем заявку
+            jdbc.update(
+                "INSERT INTO student_profiles (user_id, streak_days) VALUES (?, 0) ON CONFLICT DO NOTHING",
+                studentId
+            );
+            jdbc.update(
+                "UPDATE leads SET status='CONVERTED'::lead_status, converted_at=NOW(), converted_user_id=? WHERE id=?",
+                studentId, id
+            );
+
+            return ResponseEntity.ok(Map.of("ok", true, "studentId", studentId));
 
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
