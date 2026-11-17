@@ -32,6 +32,9 @@ public class TeacherService {
     private final UserRepository userRepository;
     private final JdbcTemplate jdbc;
     private final MessageCryptoService crypto;
+    private final BillingService billing;
+    private final AvailabilityService availability;
+    private final UserZoneService zones;
 
     public List<TeacherDto> listTeachers(String currentUserEmail) {
         String sql = """
@@ -111,7 +114,7 @@ public class TeacherService {
                             "ORDER BY l.scheduled_at ASC LIMIT 1",
                             java.sql.Timestamp.class, currentStudentId, teacherId);
                         if (ts != null) {
-                            var odt = ts.toInstant().atOffset(java.time.ZoneOffset.ofHours(3));
+                            var odt = ts.toInstant().atZone(zone());
                             String[] DAYS = {"", "ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"};
                             int dow = odt.getDayOfWeek().getValue();
                             next = DAYS[dow] + " · " + odt.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"));
@@ -182,7 +185,7 @@ public class TeacherService {
                     "ORDER BY l.scheduled_at ASC LIMIT 1",
                     java.sql.Timestamp.class, studentId, teacherId);
                 if (ts != null) {
-                    var odt = ts.toInstant().atOffset(java.time.ZoneOffset.ofHours(3));
+                    var odt = ts.toInstant().atZone(zone());
                     int dow = odt.getDayOfWeek().getValue();
                     nextLesson = DAYS[dow] + " · " + odt.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"));
                 }
@@ -275,7 +278,7 @@ public class TeacherService {
             Timestamp ts = (Timestamp) row.get("scheduled_at");
             Map<String, Object> lesson = new LinkedHashMap<>();
             lesson.put("id", row.get("id"));
-            lesson.put("date", ts != null ? ts.toInstant().atOffset(ZoneOffset.ofHours(3)).format(dtf) : "—");
+            lesson.put("date", ts != null ? ts.toInstant().atZone(zone()).format(dtf) : "—");
             lesson.put("lang", row.get("lang"));
             lesson.put("langName", row.get("lang_name"));
             lesson.put("students", row.get("students"));
@@ -308,7 +311,15 @@ public class TeacherService {
         };
     }
 
-    private static final ZoneId MOSCOW = ZoneId.of("Europe/Moscow");
+    /** Пояс того, кто назначает/переносит урок: введённое «18:00» понимается по его времени. */
+    private ZoneId zone() {
+        return zones.current();
+    }
+
+    /** «dd.MM в HH:mm» во времени получателя уведомления. */
+    private String whenFor(long userId, java.time.Instant at) {
+        return at.atZone(zones.of(userId)).format(DateTimeFormatter.ofPattern("dd.MM в HH:mm"));
+    }
 
     /** Разовое занятие — преподаватель и ученик договорились на конкретную дату/время. */
     public ResponseEntity<?> createLesson(String teacherEmail, Map<String, Object> body) {
@@ -344,9 +355,33 @@ public class TeacherService {
 
         long lessonId = insertLesson(teacherId, enrollment, scheduledAt, durationMin);
         notifyStudent(studentId, "Назначено новое занятие",
-            "У вас занятие " + scheduledAt.format(DateTimeFormatter.ofPattern("dd.MM в HH:mm")));
+            "У вас занятие " + whenFor(studentId, scheduledAt.toInstant()));
 
-        return ResponseEntity.ok(Map.of("id", lessonId));
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("id", lessonId);
+        result.put("warnings", availabilityWarnings(teacherId, List.of(scheduledAt), durationMin));
+        return ResponseEntity.ok(result);
+    }
+
+    /** Предупреждения о занятиях вне окон доступности преподавателя (занятие всё равно создаётся). */
+    private List<String> availabilityWarnings(long teacherId, List<ZonedDateTime> starts, int durationMin) {
+        List<String> warnings = new ArrayList<>();
+        for (ZonedDateTime start : starts) {
+            if (availability.isOutsideWindows(teacherId, start, durationMin)) {
+                warnings.add(availability.outsideWarning(start));
+            }
+        }
+        return warnings;
+    }
+
+    /** Время занятий по их id (для предупреждений после пакетного создания). */
+    private List<ZonedDateTime> lessonStarts(List<Long> lessonIds) {
+        List<ZonedDateTime> starts = new ArrayList<>();
+        for (Long id : lessonIds) {
+            Timestamp ts = jdbc.queryForObject("SELECT scheduled_at FROM lessons WHERE id=?", Timestamp.class, id);
+            if (ts != null) starts.add(ts.toInstant().atZone(zone()));
+        }
+        return starts;
     }
 
     /** Есть ли у преподавателя уже урок, пересекающийся по времени с [start, start+durationMin). */
@@ -395,16 +430,16 @@ public class TeacherService {
         }
 
         LocalTime lt = LocalTime.parse(time);
-        LocalDate firstDate = LocalDate.now(MOSCOW).with(DayOfWeek.of(dayOfWeek));
-        if (firstDate.isBefore(LocalDate.now(MOSCOW)) ||
-            (firstDate.isEqual(LocalDate.now(MOSCOW)) && LocalTime.now(MOSCOW).isAfter(lt))) {
+        LocalDate firstDate = LocalDate.now(zone()).with(DayOfWeek.of(dayOfWeek));
+        if (firstDate.isBefore(LocalDate.now(zone())) ||
+            (firstDate.isEqual(LocalDate.now(zone())) && LocalTime.now(zone()).isAfter(lt))) {
             firstDate = firstDate.plusWeeks(1);
         }
 
         List<Long> createdIds = new ArrayList<>();
         List<String> skipped = new ArrayList<>();
         for (int i = 0; i < weeksCount; i++) {
-            ZonedDateTime scheduledAt = firstDate.plusWeeks(i).atTime(lt).atZone(MOSCOW);
+            ZonedDateTime scheduledAt = firstDate.plusWeeks(i).atTime(lt).atZone(zone());
             if (hasConflict(teacherId, scheduledAt, durationMin, null)) {
                 skipped.add(scheduledAt.format(DateTimeFormatter.ofPattern("dd.MM")));
                 continue;
@@ -422,7 +457,8 @@ public class TeacherService {
                 "Каждую неделю по " + DAYS_RU[dayOfWeek] + " в " + time + " — на " + weeksCount + " недель вперёд");
         }
 
-        return ResponseEntity.ok(Map.of("createdCount", createdIds.size(), "ids", createdIds, "skipped", skipped));
+        return ResponseEntity.ok(Map.of("createdCount", createdIds.size(), "ids", createdIds, "skipped", skipped,
+            "warnings", availabilityWarnings(teacherId, lessonStarts(createdIds), durationMin)));
     }
 
     /** Занятия по конкретным датам — преподаватель выбрал даты вручную в календаре. */
@@ -458,7 +494,7 @@ public class TeacherService {
                 skipped.add(dateStr);
                 continue;
             }
-            ZonedDateTime scheduledAt = date.atTime(lt).atZone(MOSCOW);
+            ZonedDateTime scheduledAt = date.atTime(lt).atZone(zone());
             // нельзя создать урок в прошлом (в т.ч. на прошедшее время сегодня)
             if (scheduledAt.toInstant().isBefore(java.time.Instant.now())) {
                 skipped.add(date.format(DateTimeFormatter.ofPattern("dd.MM")) + " (время прошло)");
@@ -479,7 +515,8 @@ public class TeacherService {
             notifyStudent(studentId, "Назначены занятия",
                 "Назначено " + createdIds.size() + " занятий по выбранным датам");
         }
-        return ResponseEntity.ok(Map.of("createdCount", createdIds.size(), "ids", createdIds, "skipped", skipped));
+        return ResponseEntity.ok(Map.of("createdCount", createdIds.size(), "ids", createdIds, "skipped", skipped,
+            "warnings", availabilityWarnings(teacherId, lessonStarts(createdIds), durationMin)));
     }
 
     /** Достаёт список учеников из тела запроса: studentIds (массив) или studentId (одиночный). */
@@ -548,18 +585,21 @@ public class TeacherService {
         return insertLesson(teacherId, List.of(enrollment), scheduledAt, durationMin);
     }
 
-    /** Один урок на всех перечисленных учеников: 1 ученик — INDIVIDUAL, больше — GROUP. */
+    /**
+     * Один урок на всех перечисленных учеников: 1 ученик — INDIVIDUAL, больше — GROUP.
+     * Язык хранится у самого занятия, ученики — в lesson_students; ссылка на запись на обучение
+     * не нужна (в группе у каждого ученика своя запись).
+     */
     private long insertLesson(long teacherId, List<Map<String, Object>> enrollments, ZonedDateTime scheduledAt, int durationMin) {
         Map<String, Object> first = enrollments.get(0);
-        long enrollmentId = ((Number) first.get("enrollment_id")).longValue();
         int languageId = ((Number) first.get("language_id")).intValue();
         String format = enrollments.size() > 1 ? "GROUP" : "INDIVIDUAL";
 
         Long lessonId = jdbc.queryForObject("""
-            INSERT INTO lessons (enrollment_id, teacher_id, language_id, format, scheduled_at, duration_min, status, created_at)
-            VALUES (?, ?, ?, ?::lesson_format, ?, ?, 'PLANNED'::lesson_status, NOW())
+            INSERT INTO lessons (teacher_id, language_id, format, scheduled_at, duration_min, status, created_at)
+            VALUES (?, ?, ?::lesson_format, ?, ?, 'PLANNED'::lesson_status, NOW())
             RETURNING id
-            """, Long.class, enrollmentId, teacherId, languageId, format, Timestamp.from(scheduledAt.toInstant()), durationMin);
+            """, Long.class, teacherId, languageId, format, Timestamp.from(scheduledAt.toInstant()), durationMin);
 
         Set<Long> added = new HashSet<>();
         for (Map<String, Object> e : enrollments) {
@@ -587,7 +627,7 @@ public class TeacherService {
         try {
             return ZonedDateTime.parse(iso);
         } catch (Exception e) {
-            return java.time.LocalDateTime.parse(iso).atZone(MOSCOW);
+            return java.time.LocalDateTime.parse(iso).atZone(zone());
         }
     }
 
@@ -602,8 +642,8 @@ public class TeacherService {
         Map<String, Object> lesson;
         try {
             lesson = jdbc.queryForMap("""
-                SELECT l.id, l.scheduled_at, l.status, l.enrollment_id, e.student_id
-                FROM lessons l JOIN enrollments e ON e.id = l.enrollment_id
+                SELECT l.id, l.scheduled_at, l.status::text AS status
+                FROM lessons l
                 WHERE l.id = ? AND l.teacher_id = ?
                 """, lessonId, teacherId);
         } catch (Exception e) {
@@ -616,7 +656,7 @@ public class TeacherService {
         }
 
         Timestamp scheduledAt = (Timestamp) lesson.get("scheduled_at");
-        long studentId = ((Number) lesson.get("student_id")).longValue();
+        List<Long> studentIds = lessonStudentIds(lessonId);
         String reason = (String) body.get("reason");
 
         long hoursUntil = java.time.Duration.between(java.time.Instant.now(), scheduledAt.toInstant()).toHours();
@@ -629,27 +669,23 @@ public class TeacherService {
             "UPDATE lessons SET status='CANCELLED'::lesson_status, cancel_reason=? WHERE id=?",
             cancelNote, lessonId);
 
-        if (lateCancel) {
-            jdbc.update("""
-                UPDATE subscriptions SET lessons_used = lessons_used + 1
-                WHERE id = (
-                    SELECT s.id FROM subscriptions s
-                    WHERE s.student_id = ? AND s.status = 'ACTIVE'
-                    ORDER BY s.created_at DESC LIMIT 1
-                )
-                """, studentId);
+        // поздняя отмена засчитывается всем ученикам занятия (в т.ч. группового), с привязкой к абонементу
+        if (lateCancel) billing.chargeAll(lessonId);
+
+        for (long studentId : studentIds) {
+            String when = whenFor(studentId, scheduledAt.toInstant());
+            String chatText = lateCancel
+                ? "Урок " + when + " отменён. Так как отмена произошла менее чем за 4 часа до начала, урок засчитан как проведённый."
+                : "Урок " + when + " отменён без списания — отмена больше чем за 4 часа до начала.";
+            notifyStudent(studentId, "Урок отменён", chatText);
+            postChatMessage(teacherId, studentId, chatText);
         }
 
-        var odt = scheduledAt.toInstant().atZone(MOSCOW);
-        String when = odt.format(DateTimeFormatter.ofPattern("dd.MM в HH:mm"));
-        String chatText = lateCancel
-            ? "Урок " + when + " отменён. Так как отмена произошла менее чем за 4 часа до начала, урок засчитан как проведённый."
-            : "Урок " + when + " отменён без списания — отмена больше чем за 4 часа до начала.";
-
-        notifyStudent(studentId, "Урок отменён", chatText);
-        postChatMessage(teacherId, studentId, chatText);
-
         return ResponseEntity.ok(Map.of("lateCancel", lateCancel));
+    }
+
+    private List<Long> lessonStudentIds(long lessonId) {
+        return jdbc.queryForList("SELECT student_id FROM lesson_students WHERE lesson_id=?", Long.class, lessonId);
     }
 
     /** Перенос занятия на другое (свободное у преподавателя) время. */
@@ -664,8 +700,8 @@ public class TeacherService {
         Map<String, Object> lesson;
         try {
             lesson = jdbc.queryForMap("""
-                SELECT l.id, l.scheduled_at, l.status, l.duration_min, l.original_date, e.student_id
-                FROM lessons l JOIN enrollments e ON e.id = l.enrollment_id
+                SELECT l.id, l.scheduled_at, l.status::text AS status, l.duration_min, l.original_date
+                FROM lessons l
                 WHERE l.id = ? AND l.teacher_id = ?
                 """, lessonId, teacherId);
         } catch (Exception e) {
@@ -702,18 +738,24 @@ public class TeacherService {
 
         jdbc.update("""
             UPDATE lessons SET scheduled_at=?, original_date=?, reschedule_count=reschedule_count+1,
-                               last_rescheduled_at=NOW(), reminder_sent=FALSE
+                               last_rescheduled_at=NOW()
             WHERE id=?
             """, newTs, keepOriginal, lessonId);
+        // напоминание о новом времени должно уйти заново: очищаем журнал отправленных напоминаний
+        try {
+            jdbc.update("DELETE FROM lesson_reminder_log WHERE lesson_id=?", lessonId);
+        } catch (Exception ignored) { /* таблица создаётся сервисом напоминаний при старте */ }
 
-        long studentId = ((Number) lesson.get("student_id")).longValue();
-        String when = newAt.format(DateTimeFormatter.ofPattern("dd.MM в HH:mm"));
-        String chatText = "Урок перенесён на " + when + ".";
+        for (long studentId : lessonStudentIds(lessonId)) {
+            String chatText = "Урок перенесён на " + whenFor(studentId, newAt.toInstant()) + ".";
+            notifyStudent(studentId, "Урок перенесён", chatText);
+            postChatMessage(teacherId, studentId, chatText);
+        }
 
-        notifyStudent(studentId, "Урок перенесён", chatText);
-        postChatMessage(teacherId, studentId, chatText);
-
-        return ResponseEntity.ok(Map.of("scheduledAt", newTs.toString()));
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("scheduledAt", newTs.toString());
+        result.put("warnings", availabilityWarnings(teacherId, List.of(newAt), durationMin));
+        return ResponseEntity.ok(result);
     }
 
     /** Список учеников урока с текущей отметкой о посещении (для ручной простановки преподавателем). */
@@ -771,10 +813,16 @@ public class TeacherService {
         }
 
         resolveLessonStatus(lessonId);
+        // ручная отметка тоже приводит к списанию (или возврату при исправлении отметки)
+        billing.settleLesson(lessonId);
         return ResponseEntity.ok().build();
     }
 
-    /** Подключение к уроку (заглушка под будущую систему конференций) — отмечает присутствие звонящего. */
+    /**
+     * Подключение к уроку со страницы расписания: переводит урок в статус «идёт».
+     * Присутствие ученика здесь не отмечается — оно считается по времени в видеоконференции
+     * (веб-хуки LiveKit) или отмечается преподавателем вручную.
+     */
     public ResponseEntity<?> joinLesson(String userEmail, long lessonId) {
         if (userEmail == null) return ResponseEntity.status(401).build();
 
@@ -795,9 +843,6 @@ public class TeacherService {
         } else {
             isParticipant = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM lesson_students WHERE lesson_id=? AND student_id=?", Integer.class, lessonId, userId);
-            if (isParticipant != null && isParticipant > 0) {
-                jdbc.update("UPDATE lesson_students SET attended=true WHERE lesson_id=? AND student_id=?", lessonId, userId);
-            }
         }
         if (isParticipant == null || isParticipant == 0) {
             return ResponseEntity.status(403).body(Map.of("message", "Вы не участник этого урока"));

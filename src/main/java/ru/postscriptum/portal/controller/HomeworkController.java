@@ -5,68 +5,76 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
-import ru.postscriptum.portal.repository.UserRepository;
 
-import java.time.ZoneId;
+import ru.postscriptum.portal.service.UserZoneService;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 
+/**
+ * Домашние задания.
+ *
+ * Задание задаётся на занятие и адресовано всем ученикам этого занятия (lesson_students);
+ * каждый ученик сдаёт собственное решение (homework_submissions, уникальная пара задание + ученик).
+ * Преподаватель задания определяется через занятие.
+ * Старые персональные задания (homework.student_id заполнен) продолжают работать:
+ * их адресат — этот ученик.
+ */
 @RestController
 @RequestMapping("/api/homework")
 @RequiredArgsConstructor
 public class HomeworkController {
 
     private final JdbcTemplate jdbc;
-    private final UserRepository userRepository;
+    private final UserZoneService zones;
 
-    private static final ZoneId MOSCOW = ZoneId.of("Europe/Moscow");
     private static final DateTimeFormatter DUE_FMT = DateTimeFormatter.ofPattern("dd.MM");
+
+    /** Условие «ученик — адресат задания h» (для подстановки в WHERE с параметром student_id). */
+    private static final String RECIPIENT = """
+        (h.student_id = ? OR (h.student_id IS NULL AND EXISTS (
+            SELECT 1 FROM lesson_students ls WHERE ls.lesson_id = h.lesson_id AND ls.student_id = ?)))
+        """;
+
+    /** Преподаватель задания: через занятие, для старых заданий без занятия — сохранённый в задании. */
+    private static final String TEACHER_OF_HW = "COALESCE(l.teacher_id, h.teacher_id)";
+
+    private Long userId(Authentication auth) {
+        return jdbc.queryForObject("SELECT id FROM users WHERE email = ?", Long.class, auth.getName());
+    }
 
     // ── Student: list own homework ──────────────────────────────────────────
     @GetMapping
     public ResponseEntity<?> list(Authentication auth) {
         if (auth == null) return ResponseEntity.ok(List.of());
-
-        String email = auth.getName();
         Long studentId;
         try {
-            studentId = jdbc.queryForObject(
-                "SELECT id FROM users WHERE email = ?", Long.class, email);
+            studentId = userId(auth);
         } catch (Exception e) {
             return ResponseEntity.ok(List.of());
         }
 
-        String sql = """
-            SELECT h.id, h.title, h.description, h.due_at, h.status, h.attachment_url,
-                   COALESCE(lang.code, 'fr') AS lang,
-                   hs.grade, hs.feedback
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+            SELECT h.id, h.title, h.description, h.due_at, h.attachment_url,
+                   COALESCE(lang.code, hlang.code, 'fr') AS lang,
+                   COALESCE(hs.status, 'ASSIGNED') AS status, hs.grade, hs.feedback
             FROM homework h
             LEFT JOIN lessons l ON l.id = h.lesson_id
             LEFT JOIN languages lang ON lang.id = l.language_id
-            LEFT JOIN homework_submissions hs ON hs.homework_id = h.id
-            WHERE h.student_id = ?
+            LEFT JOIN languages hlang ON hlang.id = h.language_id
+            LEFT JOIN homework_submissions hs ON hs.homework_id = h.id AND hs.student_id = ?
+            WHERE (h.student_id = ? OR (h.student_id IS NULL AND EXISTS (
+                SELECT 1 FROM lesson_students ls WHERE ls.lesson_id = h.lesson_id AND ls.student_id = ?)))
             ORDER BY h.due_at ASC
-            """;
-
-        List<Map<String, Object>> rows = jdbc.queryForList(sql, studentId);
+            """, studentId, studentId, studentId);
 
         List<Map<String, Object>> result = new ArrayList<>();
         for (Map<String, Object> row : rows) {
-            String due = null;
-            Object dueAt = row.get("due_at");
-            if (dueAt instanceof java.sql.Timestamp ts) {
-                String formatted = ts.toInstant().atZone(MOSCOW).format(DUE_FMT);
-                due = "до " + formatted;
-            } else if (dueAt instanceof java.sql.Date d) {
-                String formatted = d.toLocalDate().format(DUE_FMT);
-                due = "до " + formatted;
-            }
-
+            String due = formatDue(row.get("due_at"));
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("id",            row.get("id"));
             item.put("title",         row.get("title"));
             item.put("description",   row.get("description"));
-            item.put("due",           due);
+            item.put("due",           due != null ? "до " + due : null);
             item.put("status",        row.get("status"));
             item.put("lang",          row.get("lang"));
             item.put("grade",         row.get("grade"));
@@ -74,7 +82,6 @@ public class HomeworkController {
             item.put("attachmentUrl", row.get("attachment_url"));
             result.add(item);
         }
-
         return ResponseEntity.ok(result);
     }
 
@@ -83,85 +90,94 @@ public class HomeworkController {
     public ResponseEntity<?> submit(Authentication auth,
                                     @PathVariable Long id,
                                     @RequestBody Map<String, String> body) {
-        Long me = jdbc.queryForObject(
-            "SELECT id FROM users WHERE email=?", Long.class, auth.getName());
+        Long me = userId(auth);
 
-        Integer own = jdbc.queryForObject(
-            "SELECT COUNT(*) FROM homework WHERE id=? AND student_id=?",
-            Integer.class, id, me);
-        if (own == null || own == 0) return ResponseEntity.status(403).build();
-
-        Integer exists = jdbc.queryForObject(
-            "SELECT COUNT(*) FROM homework_submissions WHERE homework_id=?",
-            Integer.class, id);
-        if (exists != null && exists > 0) {
-            jdbc.update(
-                "UPDATE homework_submissions SET text_content=?, file_url=?, submitted_at=NOW() WHERE homework_id=?",
-                body.get("text"), body.get("fileUrl"), id);
-        } else {
-            jdbc.update(
-                "INSERT INTO homework_submissions (homework_id, text_content, file_url, submitted_at) VALUES (?,?,?,NOW())",
-                id, body.get("text"), body.get("fileUrl"));
-        }
-
-        jdbc.update("UPDATE homework SET status='SUBMITTED'::homework_status WHERE id=?", id);
+        Integer recipient = jdbc.queryForObject(
+            "SELECT COUNT(*) FROM homework h WHERE h.id = ? AND " + RECIPIENT,
+            Integer.class, id, me, me);
+        if (recipient == null || recipient == 0) return ResponseEntity.status(403).build();
 
         jdbc.update("""
+            INSERT INTO homework_submissions (homework_id, student_id, text_content, file_url, status, submitted_at)
+            VALUES (?, ?, ?, ?, 'SUBMITTED', NOW())
+            ON CONFLICT (homework_id, student_id) DO UPDATE
+            SET text_content = EXCLUDED.text_content, file_url = EXCLUDED.file_url,
+                status = 'SUBMITTED', submitted_at = NOW()
+            """, id, me, body.get("text"), body.get("fileUrl"));
+
+        // для старых персональных заданий статус хранился и в самом задании
+        jdbc.update("UPDATE homework SET status='SUBMITTED'::homework_status WHERE id=? AND student_id=?", id, me);
+
+        String studentName = jdbc.queryForObject("SELECT name FROM users WHERE id=?", String.class, me);
+        jdbc.update("""
             INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at)
-            SELECT h.teacher_id, 'SYSTEM'::notification_type, 'Сдано домашнее задание', h.title, '/homework', false, NOW()
-            FROM homework h WHERE h.id = ?
-            """, id);
+            SELECT COALESCE(l.teacher_id, h.teacher_id), 'SYSTEM'::notification_type, 'Сдано домашнее задание', ? || ': ' || h.title, '/homework', false, NOW()
+            FROM homework h LEFT JOIN lessons l ON l.id = h.lesson_id
+            WHERE h.id = ?
+            """, studentName, id);
 
         return ResponseEntity.ok().build();
     }
 
-    // ── Teacher: review queue ───────────────────────────────────────────────
+    // ── Teacher: lessons to which homework can be assigned ─────────────────
+    @GetMapping("/lessons")
+    public ResponseEntity<?> teacherLessons(Authentication auth) {
+        Long me = userId(auth);
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+            SELECT l.id, l.scheduled_at, l.format::text AS format, lang.code AS lang, lang.name_ru AS language,
+                   STRING_AGG(u.name, ', ' ORDER BY u.name) AS students
+            FROM lessons l
+            JOIN languages lang ON lang.id = l.language_id
+            LEFT JOIN lesson_students ls ON ls.lesson_id = l.id
+            LEFT JOIN users u ON u.id = ls.student_id
+            WHERE l.teacher_id = ? AND l.status <> 'CANCELLED'::lesson_status
+              AND l.scheduled_at > NOW() - INTERVAL '30 days'
+              AND l.scheduled_at < NOW() + INTERVAL '14 days'
+            GROUP BY l.id, l.scheduled_at, l.format, lang.code, lang.name_ru
+            ORDER BY l.scheduled_at DESC
+            """, me);
+        return ResponseEntity.ok(rows);
+    }
+
+    // ── Teacher: review queue (одна строка на пару «задание + ученик») ──────
     @GetMapping("/teacher")
     public ResponseEntity<?> teacherList(Authentication auth) {
-        Long me = jdbc.queryForObject(
-            "SELECT id FROM users WHERE email=?", Long.class, auth.getName());
+        Long me = userId(auth);
 
-        String sql = """
-            SELECT h.id, h.title, h.description, h.status, h.due_at, h.attachment_url,
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+            SELECT h.id, h.title, h.description, h.due_at, h.attachment_url,
                    s.id AS student_id, s.name AS student, s.initials AS student_initials, s.avatar_url AS student_avatar,
                    COALESCE(llang.code, hlang.code, 'fr') AS lang,
-                   hs.text_content, hs.file_url, hs.submitted_at, hs.grade, hs.feedback
+                   hs.text_content, hs.file_url, hs.submitted_at, hs.grade, hs.feedback,
+                   COALESCE(hs.status, 'ASSIGNED') AS status
             FROM homework h
-            JOIN users s ON s.id = h.student_id
             LEFT JOIN lessons l ON l.id = h.lesson_id
+            JOIN LATERAL (
+                SELECT h.student_id AS sid WHERE h.student_id IS NOT NULL
+                UNION
+                SELECT ls.student_id FROM lesson_students ls
+                WHERE h.student_id IS NULL AND ls.lesson_id = h.lesson_id
+            ) r ON true
+            JOIN users s ON s.id = r.sid
             LEFT JOIN languages llang ON llang.id = l.language_id
             LEFT JOIN languages hlang ON hlang.id = h.language_id
-            LEFT JOIN homework_submissions hs ON hs.homework_id = h.id
-            WHERE h.teacher_id = ?
-            ORDER BY s.name ASC, (h.status='SUBMITTED'::homework_status) DESC, h.due_at ASC
-            """;
-
-        List<Map<String, Object>> rows = jdbc.queryForList(sql, me);
+            LEFT JOIN homework_submissions hs ON hs.homework_id = h.id AND hs.student_id = s.id
+            WHERE COALESCE(l.teacher_id, h.teacher_id) = ?
+            ORDER BY s.name ASC, (COALESCE(hs.status, '') = 'SUBMITTED') DESC, h.due_at ASC
+            """, me);
 
         List<Map<String, Object>> result = new ArrayList<>();
         for (Map<String, Object> row : rows) {
-            // format due_at → "dd.MM"
-            String due = null;
-            Object dueAt = row.get("due_at");
-            if (dueAt instanceof java.sql.Timestamp ts) {
-                due = ts.toInstant().atZone(MOSCOW).format(DUE_FMT);
-            } else if (dueAt instanceof java.sql.Date d) {
-                due = d.toLocalDate().format(DUE_FMT);
-            }
-
-            // format submittedAt as ISO string or null
             String submittedAt = null;
-            Object subAt = row.get("submitted_at");
-            if (subAt instanceof java.sql.Timestamp ts2) {
-                submittedAt = ts2.toInstant().toString();
+            if (row.get("submitted_at") instanceof java.sql.Timestamp ts) {
+                submittedAt = ts.toInstant().toString();
             }
-
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("id",              row.get("id"));
             item.put("title",           row.get("title"));
             item.put("description",     row.get("description"));
             item.put("status",          row.get("status"));
-            item.put("due",             due);
+            item.put("due",             formatDue(row.get("due_at")));
             item.put("studentId",       row.get("student_id"));
             item.put("student",         row.get("student"));
             item.put("studentInitials", row.get("student_initials"));
@@ -175,82 +191,103 @@ public class HomeworkController {
             item.put("feedback",        row.get("feedback"));
             result.add(item);
         }
-
         return ResponseEntity.ok(result);
     }
 
-    // ── Teacher: grade submission ───────────────────────────────────────────
+    // ── Teacher: grade one student's submission ─────────────────────────────
+    /** body: { studentId, grade, feedback } */
     @PostMapping("/{id}/review")
     public ResponseEntity<?> review(Authentication auth,
                                     @PathVariable Long id,
                                     @RequestBody Map<String, Object> body) {
-        Long me = jdbc.queryForObject(
-            "SELECT id FROM users WHERE email=?", Long.class, auth.getName());
+        Long me = userId(auth);
 
-        Integer own = jdbc.queryForObject(
-            "SELECT COUNT(*) FROM homework WHERE id=? AND teacher_id=?",
-            Integer.class, id, me);
-        if (own == null || own == 0) return ResponseEntity.status(403).build();
+        Map<String, Object> hw;
+        try {
+            hw = jdbc.queryForMap(
+                "SELECT h.student_id, " + TEACHER_OF_HW + " AS teacher_id FROM homework h "
+                    + "LEFT JOIN lessons l ON l.id = h.lesson_id WHERE h.id = ?", id);
+        } catch (Exception e) {
+            return ResponseEntity.status(404).build();
+        }
+        if (hw.get("teacher_id") == null || ((Number) hw.get("teacher_id")).longValue() != me) {
+            return ResponseEntity.status(403).build();
+        }
 
-        Integer grade = body.get("grade") != null
-            ? ((Number) body.get("grade")).intValue()
-            : null;
+        Long studentId = body.get("studentId") instanceof Number n ? n.longValue()
+            : hw.get("student_id") != null ? ((Number) hw.get("student_id")).longValue() : null;
+        if (studentId == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Не указан ученик"));
+        }
+
+        Integer grade = body.get("grade") != null ? ((Number) body.get("grade")).intValue() : null;
         String feedback = (String) body.get("feedback");
 
-        jdbc.update(
-            "UPDATE homework_submissions SET grade=?, feedback=?, reviewed_at=NOW(), reviewed_by=? WHERE homework_id=?",
-            grade, feedback, me, id);
-        jdbc.update("UPDATE homework SET status='REVIEWED'::homework_status WHERE id=?", id);
+        int updated = jdbc.update("""
+            UPDATE homework_submissions SET grade=?, feedback=?, status='REVIEWED', reviewed_at=NOW()
+            WHERE homework_id=? AND student_id=?
+            """, grade, feedback, id, studentId);
+        if (updated == 0) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Ученик ещё не сдал это задание"));
+        }
+        jdbc.update("UPDATE homework SET status='REVIEWED'::homework_status WHERE id=? AND student_id=?", id, studentId);
 
         jdbc.update("""
             INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at)
-            SELECT h.student_id, 'SYSTEM'::notification_type, 'Задание проверено', h.title, '/homework', false, NOW()
+            SELECT ?, 'SYSTEM'::notification_type, 'Задание проверено', h.title, '/homework', false, NOW()
             FROM homework h WHERE h.id = ?
-            """, id);
+            """, studentId, id);
 
         return ResponseEntity.ok().build();
     }
 
-    // ── Teacher: create assignment ──────────────────────────────────────────
+    // ── Teacher: create assignment for a lesson ─────────────────────────────
+    /** body: { lessonId, title, description?, dueAt?, attachmentUrl? } — задание получают все ученики занятия. */
     @PostMapping
-    public ResponseEntity<?> create(Authentication auth,
-                                    @RequestBody Map<String, Object> body) {
-        Long me = jdbc.queryForObject(
-            "SELECT id FROM users WHERE email=?", Long.class, auth.getName());
+    public ResponseEntity<?> create(Authentication auth, @RequestBody Map<String, Object> body) {
+        Long me = userId(auth);
 
-        Long studentId = ((Number) body.get("studentId")).longValue();
-        Object lessonIdRaw = body.get("lessonId");
-        Long lessonId = lessonIdRaw != null ? ((Number) lessonIdRaw).longValue() : null;
+        if (!(body.get("lessonId") instanceof Number lessonNum)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Выберите занятие, к которому относится задание"));
+        }
+        long lessonId = lessonNum.longValue();
 
-        String dueStr = (String) body.get("dueAt");
+        Integer owns = jdbc.queryForObject(
+            "SELECT COUNT(*) FROM lessons WHERE id=? AND teacher_id=?", Integer.class, lessonId, me);
+        if (owns == null || owns == 0) {
+            return ResponseEntity.status(403).body(Map.of("message", "Это не ваше занятие"));
+        }
+
         java.sql.Timestamp due = null;
-        if (dueStr != null) {
-            String normalized = dueStr.length() <= 10
-                ? dueStr + " 23:59:00"
-                : dueStr.replace("T", " ");
-            due = java.sql.Timestamp.valueOf(normalized);
+        String dueStr = (String) body.get("dueAt");
+        if (dueStr != null && !dueStr.isBlank()) {
+            // срок вводится по времени преподавателя (его часовой пояс из профиля), а не сервера
+            String normalized = dueStr.length() <= 10 ? dueStr + "T23:59:00" : dueStr.replace(" ", "T");
+            due = java.sql.Timestamp.from(java.time.LocalDateTime.parse(normalized).atZone(zones.current()).toInstant());
         }
 
-        String languageCode = (String) body.get("languageCode");
-        Long langId = null;
-        if (languageCode != null && !languageCode.isBlank()) {
-            try {
-                langId = jdbc.queryForObject("SELECT id FROM languages WHERE code=?", Long.class, languageCode);
-            } catch (Exception ignored) {}
-        }
-
+        // teacher_id и language_id заполняются для совместимости со старыми отчётами;
+        // по модели данных преподаватель и язык определяются через занятие
         Long newId = jdbc.queryForObject("""
             INSERT INTO homework (lesson_id, teacher_id, student_id, title, description, due_at, attachment_url, language_id, status, created_at)
-            VALUES (?,?,?,?,?,?,?,?,'ASSIGNED'::homework_status, NOW()) RETURNING id
+            SELECT l.id, l.teacher_id, NULL, ?, ?, ?, ?, l.language_id, 'ASSIGNED'::homework_status, NOW()
+            FROM lessons l WHERE l.id = ?
+            RETURNING id
             """, Long.class,
-            lessonId, me, studentId,
-            body.get("title"), body.get("description"), due, body.get("attachmentUrl"), langId);
+            body.get("title"), body.get("description"), due, body.get("attachmentUrl"), lessonId);
 
-        jdbc.update("""
+        int recipients = jdbc.update("""
             INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at)
-            VALUES (?, 'HOMEWORK_DUE'::notification_type, 'Новое домашнее задание', ?, '/homework', false, NOW())
-            """, studentId, body.get("title"));
+            SELECT ls.student_id, 'HOMEWORK_DUE'::notification_type, 'Новое домашнее задание', ?, '/homework', false, NOW()
+            FROM lesson_students ls WHERE ls.lesson_id = ?
+            """, body.get("title"), lessonId);
 
-        return ResponseEntity.ok(Map.of("id", newId));
+        return ResponseEntity.ok(Map.of("id", newId, "recipients", recipients));
+    }
+
+    private String formatDue(Object dueAt) {
+        if (dueAt instanceof java.sql.Timestamp ts) return ts.toInstant().atZone(zones.current()).format(DUE_FMT);
+        if (dueAt instanceof java.sql.Date d) return d.toLocalDate().format(DUE_FMT);
+        return null;
     }
 }

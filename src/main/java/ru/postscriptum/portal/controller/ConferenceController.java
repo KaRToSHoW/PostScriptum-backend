@@ -1,69 +1,40 @@
 package ru.postscriptum.portal.controller;
 
+import livekit.LivekitWebhook;
 import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
+import ru.postscriptum.portal.service.AttendanceService;
+import ru.postscriptum.portal.service.BillingService;
+import ru.postscriptum.portal.service.LiveKitService;
 
+import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
- * Собственная система видеоконференций (без внешних ссылок).
+ * Видеоконференции занятий на медиасервере LiveKit.
  *
- * Медиа идёт напрямую между участниками (WebRTC), бэкенд выполняет роль
- * сигнального сервера: очереди offer/answer/ICE-кандидатов + presence.
- * Вход в комнату фиксирует присутствие ученика, завершение урока преподавателем
- * ставит статус DONE и автоматически списывает занятие с абонемента.
+ * Серверная часть проверяет, что пользователь — участник занятия, и выдаёт токен доступа
+ * к комнате {@code lesson-<id>}. Медиасервер присылает веб-хуки о входе и выходе участников,
+ * по ним накапливается время присутствия учеников. Завершение занятия преподавателем
+ * закрывает комнату, ставит отметки посещения по порогу и списывает занятия с абонементов.
  */
+@Slf4j
 @RestController
 @RequestMapping("/api/conference")
 @RequiredArgsConstructor
 public class ConferenceController {
 
+    /** За сколько секунд до начала открывается комната. */
+    private static final long OPEN_BEFORE_SECONDS = 10 * 60;
+
     private final JdbcTemplate jdbc;
-
-    @Value("${app.turn.url:}")
-    private String turnUrl;
-    @Value("${app.turn.user:}")
-    private String turnUser;
-    @Value("${app.turn.password:}")
-    private String turnPassword;
-
-    /** ICE-конфигурация для клиентов: STUN всегда, TURN — если настроен на сервере. */
-    @GetMapping("/ice")
-    public ResponseEntity<?> ice(Authentication auth) {
-        if (auth == null) return ResponseEntity.status(401).build();
-        List<Map<String, Object>> servers = new ArrayList<>();
-        servers.add(Map.of("urls", "stun:stun.l.google.com:19302"));
-        if (turnUrl != null && !turnUrl.isBlank() && turnPassword != null && !turnPassword.isBlank()) {
-            servers.add(Map.of(
-                "urls", turnUrl,
-                "username", turnUser,
-                "credential", turnPassword));
-        }
-        return ResponseEntity.ok(Map.of("iceServers", servers));
-    }
-
-    /* ── in-memory сигналинг ─────────────────────────────────────────────── */
-
-    private static final long PRESENCE_TTL_MS = 12_000;
-
-    /** lessonId → userId → очередь сигналов для этого участника */
-    private final Map<Long, Map<Long, ConcurrentLinkedQueue<Map<String, Object>>>> queues = new ConcurrentHashMap<>();
-    /** lessonId → userId → отметка последнего опроса (presence) */
-    private final Map<Long, Map<Long, Long>> presence = new ConcurrentHashMap<>();
-
-    private Map<Long, ConcurrentLinkedQueue<Map<String, Object>>> roomQueues(long lessonId) {
-        return queues.computeIfAbsent(lessonId, k -> new ConcurrentHashMap<>());
-    }
-
-    private Map<Long, Long> roomPresence(long lessonId) {
-        return presence.computeIfAbsent(lessonId, k -> new ConcurrentHashMap<>());
-    }
+    private final LiveKitService liveKit;
+    private final AttendanceService attendance;
+    private final BillingService billing;
 
     /* ── helpers ─────────────────────────────────────────────────────────── */
 
@@ -71,6 +42,7 @@ public class ConferenceController {
         return jdbc.queryForMap("SELECT id, name, initials, role FROM users WHERE email = ?", auth.getName());
     }
 
+    /** Участник занятия: его преподаватель, ученик этого занятия, менеджер или администратор. Родитель — нет. */
     private boolean isParticipant(long lessonId, long userId, String role) {
         Integer cnt;
         if ("TEACHER".equals(role)) {
@@ -78,9 +50,11 @@ public class ConferenceController {
                 "SELECT COUNT(*) FROM lessons WHERE id=? AND teacher_id=?", Integer.class, lessonId, userId);
         } else if ("ADMIN".equals(role) || "MANAGER".equals(role)) {
             cnt = jdbc.queryForObject("SELECT COUNT(*) FROM lessons WHERE id=?", Integer.class, lessonId);
-        } else {
+        } else if ("STUDENT".equals(role)) {
             cnt = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM lesson_students WHERE lesson_id=? AND student_id=?", Integer.class, lessonId, userId);
+        } else {
+            cnt = 0;
         }
         return cnt != null && cnt > 0;
     }
@@ -128,7 +102,7 @@ public class ConferenceController {
         return ResponseEntity.ok(rows);
     }
 
-    /* ── информация об уроке: участники + материалы ──────────────────────── */
+    /* ── информация об уроке: участники + домашние задания ──────────────────────── */
 
     @GetMapping("/{lessonId}/info")
     public ResponseEntity<?> info(@PathVariable long lessonId, Authentication auth) {
@@ -157,29 +131,35 @@ public class ConferenceController {
         }
 
         List<Map<String, Object>> students = jdbc.queryForList("""
-            SELECT u.id, u.name, u.initials, u.avatar_url AS "avatarUrl", ls.attended
+            SELECT u.id, u.name, u.initials, u.avatar_url AS "avatarUrl", ls.attended,
+                   ls.present_seconds AS "presentSeconds"
             FROM lesson_students ls JOIN users u ON u.id = ls.student_id
             WHERE ls.lesson_id = ? ORDER BY u.name
             """, lessonId);
 
-        List<Map<String, Object>> materials = jdbc.queryForList("""
-            SELECT h.id, h.title, h.description, h.attachment_url, h.status::text AS status, h.due_at
+        // домашние задания к занятию; материалы урока — отдельно, /api/lessons/{id}/materials
+        // ученику — статус его решения, преподавателю — сколько учеников уже сдали
+        List<Map<String, Object>> homework = jdbc.queryForList("""
+            SELECT h.id, h.title, h.description, h.attachment_url, h.due_at,
+                   mine.status AS my_status, mine.grade AS my_grade,
+                   (SELECT COUNT(*) FROM homework_submissions s WHERE s.homework_id = h.id) AS submitted
             FROM homework h
+            LEFT JOIN homework_submissions mine ON mine.homework_id = h.id AND mine.student_id = ?
             WHERE h.lesson_id = ?
             ORDER BY h.created_at ASC
-            """, lessonId);
+            """, userId, lessonId);
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("lesson",    lesson);
         result.put("students",  students);
-        result.put("materials", materials);
+        result.put("homework",  homework);
         result.put("myId",      userId);
         result.put("myRole",    role);
         result.put("myName",    u.get("name"));
         return ResponseEntity.ok(result);
     }
 
-    /* ── вход в комнату: фиксируем присутствие ───────────────────────────── */
+    /* ── вход в комнату: проверка прав и выдача токена LiveKit ───────────── */
 
     @PostMapping("/{lessonId}/join")
     public ResponseEntity<?> join(@PathVariable long lessonId, Authentication auth) {
@@ -190,118 +170,38 @@ public class ConferenceController {
         if (!isParticipant(lessonId, userId, role)) {
             return ResponseEntity.status(403).body(Map.of("message", "Вы не участник этого урока"));
         }
+        if (!liveKit.isConfigured()) {
+            return ResponseEntity.status(503).body(Map.of("message", "Видеосвязь временно недоступна: медиасервер не настроен"));
+        }
 
-        // комната открывается за 10 минут до начала урока
+        Map<String, Object> l;
         try {
-            Map<String, Object> l = jdbc.queryForMap(
-                "SELECT scheduled_at, status::text AS status FROM lessons WHERE id=?", lessonId);
-            if ("PLANNED".equals(l.get("status"))) {
-                java.sql.Timestamp at = (java.sql.Timestamp) l.get("scheduled_at");
-                if (at != null && at.toInstant().isAfter(java.time.Instant.now().plusSeconds(10 * 60))) {
-                    return ResponseEntity.status(403).body(
-                        Map.of("message", "Конференция откроется за 10 минут до начала урока"));
-                }
-            }
-        } catch (Exception ignored) {}
-
-        if ("STUDENT".equals(role)) {
-            jdbc.update("UPDATE lesson_students SET attended=true WHERE lesson_id=? AND student_id=?", lessonId, userId);
+            l = jdbc.queryForMap("SELECT scheduled_at, status::text AS status FROM lessons WHERE id=?", lessonId);
+        } catch (Exception e) {
+            return ResponseEntity.status(404).body(Map.of("message", "Урок не найден"));
         }
-        jdbc.update(
-            "UPDATE lessons SET status='IN_PROGRESS'::lesson_status WHERE id=? AND status='PLANNED'::lesson_status",
-            lessonId);
-
-        roomQueues(lessonId).computeIfAbsent(userId, k -> new ConcurrentLinkedQueue<>());
-        roomPresence(lessonId).put(userId, System.currentTimeMillis());
-
-        return ResponseEntity.ok(Map.of("userId", userId, "role", role, "name", u.get("name")));
-    }
-
-    /* ── сигналинг WebRTC ────────────────────────────────────────────────── */
-
-    @PostMapping("/{lessonId}/signal")
-    public ResponseEntity<?> signal(@PathVariable long lessonId, Authentication auth,
-                                    @RequestBody Map<String, Object> body) {
-        if (auth == null) return ResponseEntity.status(401).build();
-        Map<String, Object> u = me(auth);
-        long userId = ((Number) u.get("id")).longValue();
-        String role = (String) u.get("role");
-        if (!isParticipant(lessonId, userId, role)) return ResponseEntity.status(403).build();
-
-        Map<String, Object> msg = new LinkedHashMap<>();
-        msg.put("from",     userId);
-        msg.put("fromName", u.get("name"));
-        msg.put("type",     body.get("type"));
-        msg.put("payload",  body.get("payload"));
-        msg.put("ts",       System.currentTimeMillis());
-
-        Object toRaw = body.get("to");
-        Map<Long, ConcurrentLinkedQueue<Map<String, Object>>> room = roomQueues(lessonId);
-        if (toRaw != null) {
-            long to = ((Number) toRaw).longValue();
-            room.computeIfAbsent(to, k -> new ConcurrentLinkedQueue<>()).add(msg);
-        } else {
-            for (Map.Entry<Long, ConcurrentLinkedQueue<Map<String, Object>>> e : room.entrySet()) {
-                if (e.getKey() != userId) e.getValue().add(msg);
-            }
+        String status = (String) l.get("status");
+        if ("DONE".equals(status) || "CANCELLED".equals(status) || "MISSED".equals(status)) {
+            return ResponseEntity.status(409).body(Map.of("message", "Урок уже завершён"));
         }
-        return ResponseEntity.ok().build();
-    }
-
-    @GetMapping("/{lessonId}/signals")
-    public ResponseEntity<?> signals(@PathVariable long lessonId, Authentication auth) {
-        if (auth == null) return ResponseEntity.status(401).build();
-        Map<String, Object> u = me(auth);
-        long userId = ((Number) u.get("id")).longValue();
-        String role = (String) u.get("role");
-        if (!isParticipant(lessonId, userId, role)) return ResponseEntity.status(403).build();
-
-        // heartbeat
-        roomPresence(lessonId).put(userId, System.currentTimeMillis());
-        roomQueues(lessonId).computeIfAbsent(userId, k -> new ConcurrentLinkedQueue<>());
-
-        // забираем накопившиеся сигналы
-        List<Map<String, Object>> out = new ArrayList<>();
-        ConcurrentLinkedQueue<Map<String, Object>> q = roomQueues(lessonId).get(userId);
-        Map<String, Object> m;
-        while ((m = q.poll()) != null) out.add(m);
-
-        // кто сейчас в комнате
-        long now = System.currentTimeMillis();
-        List<Long> online = new ArrayList<>();
-        for (Map.Entry<Long, Long> e : roomPresence(lessonId).entrySet()) {
-            if (now - e.getValue() < PRESENCE_TTL_MS) online.add(e.getKey());
+        java.sql.Timestamp at = (java.sql.Timestamp) l.get("scheduled_at");
+        if ("PLANNED".equals(status) && at != null
+                && at.toInstant().isAfter(Instant.now().plusSeconds(OPEN_BEFORE_SECONDS))) {
+            return ResponseEntity.status(403).body(
+                Map.of("message", "Конференция откроется за 10 минут до начала урока"));
         }
 
-        String status = null;
-        try {
-            status = jdbc.queryForObject("SELECT status::text FROM lessons WHERE id=?", String.class, lessonId);
-        } catch (Exception ignored) {}
-
+        String name = (String) u.get("name");
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("signals", out);
-        result.put("online",  online);
-        result.put("status",  status);
+        result.put("userId", userId);
+        result.put("role",   role);
+        result.put("name",   name);
+        result.put("url",    liveKit.clientUrl());
+        result.put("token",  liveKit.createToken(lessonId, userId, name, role));
         return ResponseEntity.ok(result);
     }
 
-    @PostMapping("/{lessonId}/leave")
-    public ResponseEntity<?> leave(@PathVariable long lessonId, Authentication auth) {
-        if (auth == null) return ResponseEntity.status(401).build();
-        Map<String, Object> u = me(auth);
-        long userId = ((Number) u.get("id")).longValue();
-        roomPresence(lessonId).remove(userId);
-        Map<Long, ConcurrentLinkedQueue<Map<String, Object>>> room = roomQueues(lessonId);
-        Map<String, Object> msg = Map.of(
-            "from", userId, "fromName", u.get("name"), "type", "leave", "ts", System.currentTimeMillis());
-        for (Map.Entry<Long, ConcurrentLinkedQueue<Map<String, Object>>> e : room.entrySet()) {
-            if (e.getKey() != userId) e.getValue().add(msg);
-        }
-        room.remove(userId);
-        return ResponseEntity.ok().build();
-    }
-
-    /* ── завершение урока преподавателем: DONE + автосписание ────────────── */
+    /* ── завершение урока: посещаемость по порогу, DONE, списание ────────── */
 
     @PostMapping("/{lessonId}/finish")
     public ResponseEntity<?> finish(@PathVariable long lessonId, Authentication auth) {
@@ -318,68 +218,55 @@ public class ConferenceController {
             if (owns == null || owns == 0) return ResponseEntity.status(404).body(Map.of("message", "Урок не найден"));
         }
 
-        // защита от повторного списания: DONE ставим только один раз
         int updated = jdbc.update(
             "UPDATE lessons SET status='DONE'::lesson_status WHERE id=? AND status IN ('PLANNED'::lesson_status,'IN_PROGRESS'::lesson_status)",
             lessonId);
-        if (updated == 0) {
-            return ResponseEntity.ok(Map.of("alreadyFinished", true));
+
+        attendance.closeOpenSessions(lessonId, Instant.now());
+        attendance.applyThreshold(lessonId);
+        int deducted = billing.settleLesson(lessonId);   // идемпотентно: повторное завершение ничего не спишет
+        liveKit.closeRoom(lessonId);
+
+        return ResponseEntity.ok(Map.of("finished", true, "alreadyFinished", updated == 0, "deducted", deducted));
+    }
+
+    /* ── веб-хуки LiveKit: вход и выход участников ───────────────────────── */
+
+    @PostMapping("/livekit/webhook")
+    public ResponseEntity<?> webhook(@RequestBody String body,
+                                     @RequestHeader(value = "Authorization", required = false) String authHeader) {
+        LivekitWebhook.WebhookEvent event;
+        try {
+            event = liveKit.receiveWebhook(body, authHeader);
+        } catch (Exception e) {
+            log.warn("LiveKit webhook отклонён: {}", e.getMessage());
+            return ResponseEntity.status(401).build();
         }
 
-        Map<String, Object> lesson = jdbc.queryForMap(
-            "SELECT teacher_id, language_id, enrollment_id FROM lessons WHERE id=?", lessonId);
-        long teacherId = ((Number) lesson.get("teacher_id")).longValue();
-        long languageId = ((Number) lesson.get("language_id")).longValue();
-        Object enrollmentId = lesson.get("enrollment_id");
+        Long lessonId = LiveKitService.lessonIdFromRoom(event.getRoom().getName());
+        if (lessonId == null) return ResponseEntity.ok().build();
+        Instant at = event.getCreatedAt() > 0 ? Instant.ofEpochSecond(event.getCreatedAt()) : Instant.now();
 
-        List<Map<String, Object>> students = jdbc.queryForList(
-            "SELECT student_id, attended FROM lesson_students WHERE lesson_id=?", lessonId);
-
-        int deducted = 0;
-        for (Map<String, Object> s : students) {
-            long studentId = ((Number) s.get("student_id")).longValue();
-
-            // неотмеченных считаем отсутствовавшими (присутствие фиксируется при входе в конференцию)
-            if (s.get("attended") == null) {
-                jdbc.update("UPDATE lesson_students SET attended=false WHERE lesson_id=? AND student_id=?",
-                    lessonId, studentId);
+        switch (event.getEvent()) {
+            case "participant_joined" -> {
+                Long participantId = parseUserId(event.getParticipant().getIdentity());
+                if (participantId != null) attendance.onJoin(lessonId, participantId, at);
             }
-
-            // урок проведён → списываем занятие с абонемента (сначала тот, что истекает раньше)
-            int rows = jdbc.update("""
-                UPDATE subscriptions SET lessons_used = lessons_used + 1
-                WHERE id = (
-                    SELECT id FROM subscriptions
-                    WHERE student_id = ? AND status = 'ACTIVE' AND lessons_used < lessons_total
-                    ORDER BY end_date ASC NULLS LAST LIMIT 1
-                )
-                """, studentId);
-            deducted += rows;
-
-            // прогресс по записи на курс
-            if (enrollmentId != null) {
-                jdbc.update("UPDATE enrollments SET lessons_done = lessons_done + 1 WHERE id=?",
-                    ((Number) enrollmentId).longValue());
-            } else {
-                jdbc.update("""
-                    UPDATE enrollments SET lessons_done = lessons_done + 1
-                    WHERE id = (
-                        SELECT id FROM enrollments
-                        WHERE student_id=? AND teacher_id=? AND language_id=? AND is_active=true
-                        ORDER BY id DESC LIMIT 1
-                    )
-                    """, studentId, teacherId, languageId);
+            case "participant_left", "participant_connection_aborted" -> {
+                Long participantId = parseUserId(event.getParticipant().getIdentity());
+                if (participantId != null) attendance.onLeave(lessonId, participantId, at);
             }
+            case "room_finished" -> attendance.closeOpenSessions(lessonId, at);
+            default -> { /* остальные события не используются */ }
         }
+        return ResponseEntity.ok().build();
+    }
 
-        // сообщаем всем в комнате, что урок завершён
-        Map<Long, ConcurrentLinkedQueue<Map<String, Object>>> room = roomQueues(lessonId);
-        Map<String, Object> msg = Map.of(
-            "from", userId, "fromName", u.get("name"), "type", "finished", "ts", System.currentTimeMillis());
-        for (Map.Entry<Long, ConcurrentLinkedQueue<Map<String, Object>>> e : room.entrySet()) {
-            if (e.getKey() != userId) e.getValue().add(msg);
+    private static Long parseUserId(String identity) {
+        try {
+            return Long.parseLong(identity);
+        } catch (Exception e) {
+            return null;
         }
-
-        return ResponseEntity.ok(Map.of("finished", true, "deducted", deducted));
     }
 }

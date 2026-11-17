@@ -29,7 +29,8 @@ public class MessagesController {
             SELECT c.id AS conv_id, u.id AS user_id, u.name, u.initials, u.avatar_url, u.role AS role,
                    (SELECT m.body FROM messages m WHERE m.conversation_id = c.id ORDER BY m.sent_at DESC LIMIT 1) AS last_msg,
                    (SELECT m.sent_at FROM messages m WHERE m.conversation_id = c.id ORDER BY m.sent_at DESC LIMIT 1) AS last_ts,
-                   (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_id != me.id AND m.is_read = false) AS unread
+                   (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_id != me.id
+                       AND m.sent_at > COALESCE(cm.last_read_at, to_timestamp(0))) AS unread
             FROM conversations c
             JOIN conversation_members cm ON cm.conversation_id = c.id
             JOIN users me ON me.email = ?
@@ -62,15 +63,33 @@ public class MessagesController {
     public ResponseEntity<?> messages(Authentication auth, @PathVariable Long convId) {
         if (auth == null) return ResponseEntity.ok(List.of());
 
+        // читать диалог могут только его участники (а также менеджер и администратор — для поддержки)
+        Map<String, Object> me = jdbc.queryForMap("SELECT id, role FROM users WHERE email = ?", auth.getName());
+        long meId = ((Number) me.get("id")).longValue();
+        String role = (String) me.get("role");
+        Integer member = jdbc.queryForObject(
+            "SELECT COUNT(*) FROM conversation_members WHERE conversation_id=? AND user_id=?", Integer.class, convId, meId);
+        if ((member == null || member == 0) && !"ADMIN".equals(role) && !"MANAGER".equals(role)) {
+            return ResponseEntity.status(403).build();
+        }
+
+        // «прочитано»: своё сообщение — если его прочитал кто-то из собеседников, чужое — если прочитал я
         String sql = """
-            SELECT m.id, m.body, m.sent_at, m.is_read, m.is_system,
-                   u.id AS sender_id, u.name AS sender_name, u.email AS sender_email, u.role AS sender_role
+            SELECT m.id, m.body, m.sent_at, m.is_system,
+                   u.id AS sender_id, u.name AS sender_name, u.email AS sender_email, u.role AS sender_role,
+                   CASE WHEN m.sender_id = ?
+                        THEN EXISTS (SELECT 1 FROM conversation_members o
+                                     WHERE o.conversation_id = m.conversation_id AND o.user_id <> ?
+                                       AND o.last_read_at >= m.sent_at)
+                        ELSE COALESCE((SELECT mine.last_read_at >= m.sent_at FROM conversation_members mine
+                                       WHERE mine.conversation_id = m.conversation_id AND mine.user_id = ?), false)
+                   END AS is_read
             FROM messages m JOIN users u ON u.id = m.sender_id
             WHERE m.conversation_id = ?
             ORDER BY m.sent_at ASC
             """;
 
-        List<Map<String, Object>> rows = jdbc.queryForList(sql, convId);
+        List<Map<String, Object>> rows = jdbc.queryForList(sql, meId, meId, meId, convId);
 
         List<Map<String, Object>> result = new ArrayList<>();
         for (Map<String, Object> row : rows) {
@@ -178,11 +197,11 @@ public class MessagesController {
         return ResponseEntity.ok(Map.of("conversationId", convId));
     }
 
-    // POST /api/messages/{convId}/read  → mark all messages from others as read
+    // POST /api/messages/{convId}/read  → всё, что пришло в диалог до этого момента, прочитано
     @PostMapping("/{convId}/read")
     public ResponseEntity<?> markRead(Authentication auth, @PathVariable Long convId) {
         Long me = jdbc.queryForObject("SELECT id FROM users WHERE email = ?", Long.class, auth.getName());
-        jdbc.update("UPDATE messages SET is_read=true WHERE conversation_id=? AND sender_id != ?", convId, me);
+        jdbc.update("UPDATE conversation_members SET last_read_at = NOW() WHERE conversation_id=? AND user_id=?", convId, me);
         return ResponseEntity.ok().build();
     }
 }

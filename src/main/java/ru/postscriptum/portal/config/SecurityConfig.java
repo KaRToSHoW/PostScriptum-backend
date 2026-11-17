@@ -43,7 +43,9 @@ public class SecurityConfig {
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-                .requestMatchers("/api/auth/**", "/h2-console/**", "/error").permitAll()
+                .requestMatchers("/api/auth/**", "/error").permitAll()
+                // Веб-хуки медиасервера LiveKit: подлинность проверяется подписью внутри обработчика
+                .requestMatchers(HttpMethod.POST, "/api/conference/livekit/webhook").permitAll()
                 // Публичная заявка «запись через менеджера» со страницы входа
                 .requestMatchers(HttpMethod.POST, "/api/leads").permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/teachers", "/api/teachers/**").permitAll()
@@ -52,9 +54,15 @@ public class SecurityConfig {
                 // чужих аккаунтов) — только ADMIN, менеджеру это недоступно
                 .requestMatchers("/api/admin/users/**").hasRole("ADMIN")
                 .requestMatchers("/api/admin/**").hasAnyRole("ADMIN", "MANAGER")
+                // Расписание и распределение учеников от лица менеджера
+                .requestMatchers("/api/manager/**").hasAnyRole("ADMIN", "MANAGER")
+                // Общий календарь школы: имена всех учеников и преподавателей — только персоналу
+                .requestMatchers("/api/calendar/admin").hasAnyRole("ADMIN", "MANAGER")
+                .requestMatchers("/api/parent/**").hasRole("PARENT")
                 .anyRequest().authenticated()
             )
-            .headers(h -> h.frameOptions(f -> f.disable()))  // для H2 console
+            // запрет встраивания сайта в чужие страницы (защита от clickjacking)
+            .headers(h -> h.frameOptions(f -> f.sameOrigin()))
             .exceptionHandling(e -> e
                 .authenticationEntryPoint((req, res, ex) -> {
                     res.setStatus(401);

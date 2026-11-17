@@ -6,6 +6,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import ru.postscriptum.portal.repository.UserRepository;
+import ru.postscriptum.portal.service.BillingService;
 
 import java.util.*;
 
@@ -16,6 +17,7 @@ public class SubscriptionsController {
 
     private final JdbcTemplate jdbc;
     private final UserRepository userRepository;
+    private final BillingService billing;
 
     @GetMapping
     public ResponseEntity<?> list(Authentication auth) {
@@ -30,35 +32,79 @@ public class SubscriptionsController {
             return ResponseEntity.ok(List.of());
         }
 
-        String sql = """
-            SELECT s.id, s.lessons_used, s.lessons_total, s.start_date, s.end_date, s.status,
-                   p.name AS plan_name, p.price, COALESCE(lang.code, '') AS lang, COALESCE(lang.name_ru, '') AS lang_name
-            FROM subscriptions s
-            JOIN subscription_plans p ON p.id = s.plan_id
-            LEFT JOIN languages lang ON lang.id = p.language_id
-            WHERE s.student_id = ?
-            ORDER BY s.created_at DESC
-            """;
+        return ResponseEntity.ok(billing.subscriptionsOf(studentId));
+    }
 
-        List<Map<String, Object>> rows = jdbc.queryForList(sql, studentId);
+    /** Ученик может сам покупать абонементы с этого возраста; младше — покупает родитель. */
+    static final int SELF_PURCHASE_AGE = 18;
 
-        List<Map<String, Object>> result = new ArrayList<>();
-        for (Map<String, Object> row : rows) {
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("id",        row.get("id"));
-            item.put("planName",  row.get("plan_name"));
-            item.put("lang",      row.get("lang"));
-            item.put("langName",  row.get("lang_name"));
-            item.put("used",      row.get("lessons_used"));
-            item.put("total",     row.get("lessons_total"));
-            item.put("startDate", row.get("start_date"));
-            item.put("endDate",   row.get("end_date"));
-            item.put("status",    row.get("status"));
-            item.put("price",     row.get("price"));
-            result.add(item);
+    /**
+     * Запрос на покупку абонемента: body {planId, studentId?}.
+     * Ученик с 18 лет покупает себе сам, родитель — своему ребёнку (studentId обязателен).
+     * Онлайн-оплаты в системе пока нет, поэтому запрос уходит администраторам, а абонемент
+     * оформляется после оплаты с указанием покупателя (purchasedBy).
+     */
+    @PostMapping("/purchase-request")
+    public ResponseEntity<?> purchaseRequest(Authentication auth, @RequestBody Map<String, Object> body) {
+        if (auth == null) return ResponseEntity.status(401).build();
+        Map<String, Object> me = jdbc.queryForMap("SELECT id, name, role::text AS role FROM users WHERE email = ?", auth.getName());
+        long meId = ((Number) me.get("id")).longValue();
+        String role = (String) me.get("role");
+
+        if (!(body.get("planId") instanceof Number planNum)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Не выбран тариф"));
+        }
+        long planId = planNum.longValue();
+
+        long studentId;
+        if ("STUDENT".equals(role)) {
+            studentId = meId;
+            java.sql.Date birth = null;
+            try {
+                birth = jdbc.queryForObject("SELECT birth_date FROM student_profiles WHERE user_id=?", java.sql.Date.class, meId);
+            } catch (Exception ignored) { }
+            if (birth == null) {
+                return ResponseEntity.status(403).body(Map.of("message",
+                    "Укажите дату рождения в профиле: самостоятельно покупать абонементы можно с " + SELF_PURCHASE_AGE + " лет"));
+            }
+            int age = java.time.Period.between(birth.toLocalDate(), java.time.LocalDate.now()).getYears();
+            if (age < SELF_PURCHASE_AGE) {
+                return ResponseEntity.status(403).body(Map.of("message",
+                    "Ученикам младше " + SELF_PURCHASE_AGE + " лет абонемент оформляет родитель"));
+            }
+        } else if ("PARENT".equals(role)) {
+            if (!(body.get("studentId") instanceof Number sNum)) {
+                return ResponseEntity.badRequest().body(Map.of("message", "Не выбран ребёнок"));
+            }
+            studentId = sNum.longValue();
+            Integer own = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM student_profiles WHERE user_id=? AND parent_id=?", Integer.class, studentId, meId);
+            if (own == null || own == 0) {
+                return ResponseEntity.status(403).body(Map.of("message", "Можно оформить абонемент только своему ребёнку"));
+            }
+        } else {
+            return ResponseEntity.status(403).body(Map.of("message", "Абонементы приобретают ученики и родители"));
         }
 
-        return ResponseEntity.ok(result);
+        Map<String, Object> plan;
+        try {
+            plan = jdbc.queryForMap("SELECT name FROM subscription_plans WHERE id=? AND is_active=true", planId);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Тариф не найден"));
+        }
+        String studentName = jdbc.queryForObject("SELECT name FROM users WHERE id=?", String.class, studentId);
+        // способ оплаты, выбранный в окне оплаты (заглушка до подключения платёжного шлюза)
+        String method = "sbp".equals(body.get("paymentMethod")) ? "СБП" : "карта";
+        String text = "Ученик: " + studentName + ", тариф: " + plan.get("name") + ", покупатель: " + me.get("name")
+            + " (id " + meId + "), способ оплаты: " + method;
+
+        jdbc.update("""
+            INSERT INTO notifications (user_id, type, title, body, link, is_read, created_at)
+            SELECT u.id, 'SYSTEM'::notification_type, 'Запрос на покупку абонемента', ?, '/admin/subscriptions', false, NOW()
+            FROM users u WHERE u.role IN ('ADMIN','MANAGER') AND u.is_active = true
+            """, text);
+
+        return ResponseEntity.ok(Map.of("status", "REQUESTED", "studentId", studentId, "purchasedBy", meId));
     }
 
     @GetMapping("/plans")

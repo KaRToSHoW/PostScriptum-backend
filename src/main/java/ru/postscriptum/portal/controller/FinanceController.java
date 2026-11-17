@@ -228,10 +228,13 @@ public class FinanceController {
         }
         int lessonCount = ((Number) plan.get("lesson_count")).intValue();
 
+        // покупатель (ученик с 18 лет или родитель) — из запроса на покупку; при ручном оформлении пусто
+        Long purchasedBy = body.get("purchasedBy") instanceof Number p ? p.longValue() : null;
+
         jdbc.update(
-            "INSERT INTO subscriptions (student_id, plan_id, lessons_used, lessons_total, start_date, end_date, status, created_at) " +
-            "VALUES (?, ?, 0, ?, CURRENT_DATE, CURRENT_DATE + INTERVAL '30 days', 'ACTIVE'::subscription_status, NOW())",
-            studentId, planId, lessonCount
+            "INSERT INTO subscriptions (student_id, plan_id, purchased_by, lessons_used, lessons_total, start_date, end_date, status, created_at) " +
+            "VALUES (?, ?, ?, 0, ?, CURRENT_DATE, CURRENT_DATE + INTERVAL '30 days', 'ACTIVE'::subscription_status, NOW())",
+            studentId, planId, purchasedBy, lessonCount
         );
 
         return ResponseEntity.ok().build();

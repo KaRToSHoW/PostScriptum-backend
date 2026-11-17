@@ -9,7 +9,6 @@ import ru.postscriptum.portal.repository.UserRepository;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 
@@ -19,15 +18,16 @@ public class DashboardService {
 
     private final JdbcTemplate jdbc;
     private final UserRepository userRepository;
+    private final UserZoneService zones;
 
     // ─── helpers ────────────────────────────────────────────────────────────
 
-    private static final ZoneOffset MSK = ZoneOffset.ofHours(3);
     private static final DateTimeFormatter HH_MM = DateTimeFormatter.ofPattern("HH:mm");
 
+    /** Время из БД — в часовом поясе того, кто смотрит (ученик, родитель или преподаватель). */
     private OffsetDateTime toMsk(Object raw) {
         if (raw instanceof Timestamp ts) {
-            return ts.toInstant().atOffset(MSK);
+            return ts.toInstant().atZone(zones.current()).toOffsetDateTime();
         }
         return null;
     }
@@ -212,16 +212,18 @@ public class DashboardService {
 
         // homework
         List<Map<String, Object>> hwRows = jdbc.queryForList(
-                "SELECT h.id, h.title, h.due_at, h.status, " +
+                "SELECT h.id, h.title, h.due_at, COALESCE(hs.status, 'ASSIGNED') AS status, " +
                 "       COALESCE(llang.code, hlang.code) AS lang " +
                 "FROM homework h " +
                 "LEFT JOIN lessons l ON l.id = h.lesson_id " +
                 "LEFT JOIN languages llang ON llang.id = l.language_id " +
                 "LEFT JOIN languages hlang ON hlang.id = h.language_id " +
-                "WHERE h.student_id = ? " +
+                "LEFT JOIN homework_submissions hs ON hs.homework_id = h.id AND hs.student_id = ? " +
+                "WHERE (h.student_id = ? OR (h.student_id IS NULL AND EXISTS (" +
+                "        SELECT 1 FROM lesson_students ls WHERE ls.lesson_id = h.lesson_id AND ls.student_id = ?))) " +
                 "ORDER BY h.due_at ASC " +
                 "LIMIT 5",
-                studentId);
+                studentId, studentId, studentId);
 
         List<Map<String, Object>> homework = new ArrayList<>();
         for (Map<String, Object> row : hwRows) {
@@ -293,23 +295,25 @@ public class DashboardService {
         result.put("schedule", schedule);
 
         // workload — lessons count per day of current week (Mon–Sun)
-        LocalDate today = LocalDate.now(MSK);
+        java.time.ZoneId zone = zones.current();
+        LocalDate today = LocalDate.now(zone);
         LocalDate monday = today.with(java.time.DayOfWeek.MONDAY);
 
         String[] dayLabels = {"ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"};
 
         // Count lessons per calendar day of this week
         List<Map<String, Object>> lessonDayCounts = jdbc.queryForList(
-                "SELECT DATE(scheduled_at AT TIME ZONE 'Europe/Moscow') AS lesson_date, " +
+                "SELECT DATE(scheduled_at AT TIME ZONE ?) AS lesson_date, " +
                 "       SUM(duration_min) AS total_min " +
                 "FROM lessons " +
                 "WHERE teacher_id = ? " +
                 "  AND scheduled_at >= ? " +
                 "  AND scheduled_at < ? " +
                 "GROUP BY lesson_date",
+                zone.getId(),
                 teacherId,
-                java.sql.Date.valueOf(monday),
-                java.sql.Date.valueOf(monday.plusWeeks(1)));
+                Timestamp.from(monday.atStartOfDay(zone).toInstant()),
+                Timestamp.from(monday.plusWeeks(1).atStartOfDay(zone).toInstant()));
 
         // Build a lookup: date -> total_min
         Map<LocalDate, Integer> minutesByDay = new HashMap<>();
@@ -361,9 +365,10 @@ public class DashboardService {
             List<Map<String, Object>> submitted = jdbc.queryForList(
                     "SELECT s.name AS who, h.title, hs.submitted_at " +
                     "FROM homework h " +
+                    "LEFT JOIN lessons l ON l.id = h.lesson_id " +
                     "JOIN homework_submissions hs ON hs.homework_id = h.id " +
-                    "JOIN users s ON s.id = h.student_id " +
-                    "WHERE h.teacher_id = ? AND h.status = 'SUBMITTED' " +
+                    "JOIN users s ON s.id = hs.student_id " +
+                    "WHERE COALESCE(l.teacher_id, h.teacher_id) = ? AND hs.status = 'SUBMITTED' " +
                     "ORDER BY hs.submitted_at DESC LIMIT 5",
                     teacherId);
             for (Map<String, Object> row : submitted) {
@@ -404,7 +409,7 @@ public class DashboardService {
 
     private String relTime(OffsetDateTime dt) {
         if (dt == null) return "";
-        long mins = java.time.Duration.between(dt, OffsetDateTime.now(MSK)).toMinutes();
+        long mins = java.time.Duration.between(dt, OffsetDateTime.now()).toMinutes();
         if (mins < 0)   return "скоро";
         if (mins < 60)  return mins + " мин назад";
         long h = mins / 60;

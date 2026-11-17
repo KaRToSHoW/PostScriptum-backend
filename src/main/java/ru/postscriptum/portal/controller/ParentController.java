@@ -5,6 +5,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
+import ru.postscriptum.portal.service.BillingService;
+import ru.postscriptum.portal.service.CalendarService;
 import ru.postscriptum.portal.service.DashboardService;
 
 import java.util.*;
@@ -16,6 +18,8 @@ public class ParentController {
 
     private final JdbcTemplate jdbc;
     private final DashboardService dashboardService;
+    private final CalendarService calendar;
+    private final BillingService billing;
 
     /** Дети текущего родителя. */
     @GetMapping("/children")
@@ -53,17 +57,35 @@ public class ParentController {
     /** Дашборд конкретного ребёнка (только если он привязан к этому родителю). */
     @GetMapping("/child/{id}/dashboard")
     public ResponseEntity<?> childDashboard(Authentication auth, @PathVariable Long id) {
-        if (auth == null) return ResponseEntity.status(401).build();
+        if (!isMyChild(auth, id)) return forbidden();
+        return ResponseEntity.ok(dashboardService.getStudentDashboard(id));
+    }
 
+    /** Расписание ребёнка за месяц — во времени часового пояса родителя. */
+    @GetMapping("/child/{id}/calendar")
+    public ResponseEntity<?> childCalendar(Authentication auth, @PathVariable Long id,
+                                           @RequestParam int year, @RequestParam int month) {
+        if (!isMyChild(auth, id)) return forbidden();
+        return ResponseEntity.ok(calendar.studentMonth(id, year, month));
+    }
+
+    /** Абонементы ребёнка (в т.ч. кем куплены). */
+    @GetMapping("/child/{id}/subscriptions")
+    public ResponseEntity<?> childSubscriptions(Authentication auth, @PathVariable Long id) {
+        if (!isMyChild(auth, id)) return forbidden();
+        return ResponseEntity.ok(billing.subscriptionsOf(id));
+    }
+
+    private boolean isMyChild(Authentication auth, long childId) {
+        if (auth == null) return false;
         Integer ok = jdbc.queryForObject(
             "SELECT COUNT(*) FROM student_profiles sp JOIN users me ON me.email=? " +
             "WHERE sp.user_id=? AND sp.parent_id=me.id",
-            Integer.class, auth.getName(), id);
+            Integer.class, auth.getName(), childId);
+        return ok != null && ok > 0;
+    }
 
-        if (ok == null || ok == 0) {
-            return ResponseEntity.status(403).body(Map.of("message", "Нет доступа к этому ученику"));
-        }
-
-        return ResponseEntity.ok(dashboardService.getStudentDashboard(id));
+    private static ResponseEntity<?> forbidden() {
+        return ResponseEntity.status(403).body(Map.of("message", "Нет доступа к этому ученику"));
     }
 }

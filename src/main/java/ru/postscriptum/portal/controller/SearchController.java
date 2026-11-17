@@ -67,28 +67,33 @@ public class SearchController {
         // ── Домашние задания ─────────────────────────────────────────────────
         if ("STUDENT".equals(role)) {
             List<Map<String, Object>> hw = jdbc.queryForList("""
-                SELECT h.id, h.title, h.status,
+                SELECT h.id, h.title, COALESCE(hs.status, 'ASSIGNED') AS status,
                        COALESCE(llang.code, hlang.code, 'fr') AS lang
                 FROM homework h
                 LEFT JOIN lessons   l     ON l.id     = h.lesson_id
                 LEFT JOIN languages llang ON llang.id = l.language_id
                 LEFT JOIN languages hlang ON hlang.id = h.language_id
-                WHERE h.student_id = ? AND LOWER(h.title) LIKE ?
+                LEFT JOIN homework_submissions hs ON hs.homework_id = h.id AND hs.student_id = ?
+                WHERE (h.student_id = ? OR (h.student_id IS NULL AND EXISTS (
+                        SELECT 1 FROM lesson_students ls WHERE ls.lesson_id = h.lesson_id AND ls.student_id = ?)))
+                  AND LOWER(h.title) LIKE ?
                 ORDER BY h.due_at ASC LIMIT 5
-                """, userId, qLike);
+                """, userId, userId, userId, qLike);
             if (!hw.isEmpty()) result.put("homework", hw);
         }
 
         if ("TEACHER".equals(role)) {
             List<Map<String, Object>> hw = jdbc.queryForList("""
-                SELECT h.id, h.title, h.status, u.name AS student,
+                SELECT h.id, h.title, h.status::text AS status,
+                       COALESCE(u.name, (SELECT STRING_AGG(su.name, ', ') FROM lesson_students ls
+                                         JOIN users su ON su.id = ls.student_id WHERE ls.lesson_id = h.lesson_id)) AS student,
                        COALESCE(llang.code, hlang.code, 'fr') AS lang
                 FROM homework h
-                JOIN  users     u     ON u.id     = h.student_id
+                LEFT JOIN users     u     ON u.id     = h.student_id
                 LEFT JOIN lessons   l     ON l.id     = h.lesson_id
                 LEFT JOIN languages llang ON llang.id = l.language_id
                 LEFT JOIN languages hlang ON hlang.id = h.language_id
-                WHERE h.teacher_id = ? AND LOWER(h.title) LIKE ?
+                WHERE COALESCE(l.teacher_id, h.teacher_id) = ? AND LOWER(h.title) LIKE ?
                 ORDER BY h.due_at ASC LIMIT 5
                 """, userId, qLike);
             if (!hw.isEmpty()) result.put("homework", hw);

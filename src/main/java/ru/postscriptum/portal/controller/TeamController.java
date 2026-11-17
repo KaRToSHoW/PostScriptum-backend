@@ -20,13 +20,14 @@ import java.util.Map;
 public class TeamController {
 
     private final JdbcTemplate jdbc;
+    private final ru.postscriptum.portal.service.UserZoneService zones;
 
     @GetMapping("/team")
     public ResponseEntity<?> team(Authentication auth) {
         if (auth == null) return ResponseEntity.ok(List.of());
 
-        // Границы текущей недели (Пн 00:00 — след. Пн) в МСК
-        java.time.ZoneId msk = java.time.ZoneId.of("Europe/Moscow");
+        // Границы текущей недели (Пн 00:00 — след. Пн) в часовом поясе пользователя
+        java.time.ZoneId msk = zones.current();
         java.time.LocalDate monday = java.time.LocalDate.now(msk).with(java.time.DayOfWeek.MONDAY);
         Timestamp weekStart = Timestamp.from(monday.atStartOfDay(msk).toInstant());
         Timestamp weekEnd   = Timestamp.from(monday.plusWeeks(1).atStartOfDay(msk).toInstant());
@@ -36,11 +37,11 @@ public class TeamController {
         final java.util.Map<Long, Integer> minutesByTeacher = new java.util.HashMap<>();
         for (Map<String, Object> r : jdbc.queryForList(
                 "SELECT teacher_id, " +
-                "       EXTRACT(ISODOW FROM (scheduled_at AT TIME ZONE 'Europe/Moscow'))::int AS dow, " +
+                "       EXTRACT(ISODOW FROM (scheduled_at AT TIME ZONE ?))::int AS dow, " +
                 "       COUNT(*)::int AS cnt, COALESCE(SUM(duration_min),0)::int AS mins " +
                 "FROM lessons WHERE scheduled_at >= ? AND scheduled_at < ? " +
                 "GROUP BY teacher_id, dow",
-                weekStart, weekEnd)) {
+                msk.getId(), weekStart, weekEnd)) {
             Long tid = ((Number) r.get("teacher_id")).longValue();
             int dow  = ((Number) r.get("dow")).intValue();      // 1=Пн .. 7=Вс
             int cnt  = ((Number) r.get("cnt")).intValue();
